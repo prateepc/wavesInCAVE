@@ -1,0 +1,25 @@
+[Library]
+[library]
+[    L|l]ibrary/
+[O|o]bj/
+[B|b]uild/
+[B|b]uilds/
+[L|l]ogs/
+[U|u]ser[D|d]ata/
+MemoryCaptures/
+/[A|a]ssets/AssetStoreTools*
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.opendb
+*.VC.db
+*.pidb.meta
+*.pdb.meta
