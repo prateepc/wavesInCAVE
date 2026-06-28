@@ -25,3 +25,6 @@ MemoryCaptures/
 *.pdb.meta
 UserSettings/
 Temp/
+/[Tt]emp/
+/Logs/
+.DS_Store
