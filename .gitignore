@@ -24,3 +24,4 @@ MemoryCaptures/
 *.pidb.meta
 *.pdb.meta
 UserSettings/
+Temp/
