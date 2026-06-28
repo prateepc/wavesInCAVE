@@ -10,7 +10,12 @@ public class AdvancedWaveManager : MonoBehaviour
     public GameObject wavePrefab; 
     
     [Header("Simulation Timing")]
-    public float waveGenerationInterval = 0.15f; 
+    [Tooltip("Time in seconds between each frozen snapshot layer creation.")]
+    public float waveGenerationInterval = 0.25f; 
+
+    [Header("Acoustic Physics Settings")]
+    [Tooltip("Slowing down velocity so human eyes can track wave propagation in the CAVE.")]
+    public float simulationSpeedMultiplier = 0.008f; 
 
     private int targetFrequency = 440; 
     private AudioSource audioSource;
@@ -20,7 +25,11 @@ public class AdvancedWaveManager : MonoBehaviour
     
     private float waveTimer = 0f;
     private bool dataLoaded = false;
-    private float maxChamberRadius = 5.0f; 
+
+    // NIST Fixed Rectangular Internal Bounds (Half-extents from Center Origin)
+    private float boundX = 3.35f;  // Total Width = 6.7m
+    private float boundY = 3.35f;  // Total Height = 6.7m
+    private float boundZ = 5.00f;  // Total Length = 10.0m
 
     void Start()
     {
@@ -34,6 +43,7 @@ public class AdvancedWaveManager : MonoBehaviour
 
         waveTimer += Time.deltaTime;
 
+        // Task 6: Spawn sequential frozen outward-traveling snapshots
         if (waveTimer >= waveGenerationInterval)
         {
             EmitWaveSnapshot();
@@ -63,12 +73,7 @@ public class AdvancedWaveManager : MonoBehaviour
         if (int.TryParse(cleanName, out int parsedFreq))
         {
             targetFrequency = parsedFreq;
-            Debug.Log("🤖 Automation Engine: Detected newest frequency configuration -> " + targetFrequency + "Hz");
-        }
-        else
-        {
-            Debug.LogError("❌ Couldn't parse frequency from file name: " + csvFileName);
-            return;
+            Debug.Log("🤖 Automation Engine: Operating at -> " + targetFrequency + "Hz");
         }
 
         string[] dataLines = File.ReadAllLines(targetCSVPath);
@@ -94,16 +99,11 @@ public class AdvancedWaveManager : MonoBehaviour
         using (UnityWebRequest multimediaRequest = UnityWebRequestMultimedia.GetAudioClip("file://" + path, AudioType.WAV))
         {
             yield return multimediaRequest.SendWebRequest();
-
             if (multimediaRequest.result == UnityWebRequest.Result.Success)
             {
                 audioSource.clip = DownloadHandlerAudioClip.GetContent(multimediaRequest);
                 audioSource.loop = true;
                 audioSource.Play();
-            }
-            else
-            {
-                Debug.LogError("❌ Audio pipeline initialization failed: " + multimediaRequest.error);
             }
         }
     }
@@ -112,15 +112,16 @@ public class AdvancedWaveManager : MonoBehaviour
     {
         if (wavePrefab == null) return;
 
+        // Spawn a fresh snapshot layer at our point source origin center
         GameObject newWave = Instantiate(wavePrefab, transform.position, Quaternion.identity);
-        newWave.transform.localScale = Vector3.zero;
+        newWave.transform.localScale = new Vector3(0.1f, 0.1f, 0.1f);
         
+        // Logarithmic color mapping spectrum calculations (20Hz - 20kHz)
         float logFreq = Mathf.Log10(targetFrequency);
         float normFreq = Mathf.InverseLerp(Mathf.Log10(20f), Mathf.Log10(20000f), logFreq);
-        
         Color baseFreqColor = Color.HSVToRGB(normFreq * 0.85f, 0.9f, 0.9f); 
-        newWave.GetComponent<Renderer>().material.color = baseFreqColor;
         
+        newWave.GetComponent<Renderer>().material.color = baseFreqColor;
         activeWaves.Add(newWave);
     }
 
@@ -133,26 +134,34 @@ public class AdvancedWaveManager : MonoBehaviour
             GameObject wave = activeWaves[i];
             if (wave == null) continue;
 
+            // Expand scale outward continuously using human-readable velocity metrics
             float currentRadius = wave.transform.localScale.x / 2f;
-            currentRadius += 343f * Time.deltaTime * 0.005f; 
+            currentRadius += 343f * Time.deltaTime * simulationSpeedMultiplier; 
+            
+            wave.transform.localScale = new Vector3(currentRadius * 2f, currentRadius * 2f, currentRadius * 2f);
 
-            float waveDensityFactor = 1f + (currentRadius * 0.15f);
-            wave.transform.localScale = new Vector3(currentRadius * 2, currentRadius * 2, currentRadius * 2) * waveDensityFactor;
-
+            // Compute Inverse Square Law energy loss updates (Shade shifts darker & clears Alpha)
             Renderer waveRenderer = wave.GetComponent<Renderer>();
             Color currentColor = waveRenderer.material.color;
             
-            float energyAlpha = Mathf.Clamp01(1f / (currentRadius * currentRadius + 0.5f));
-            currentColor.a = energyAlpha * 0.5f;
+            // Energy drops off exponentially over expanding radius distances
+            float energyDecayFactor = Mathf.Clamp01(1f / (currentRadius * currentRadius + 0.3f));
             
-            waveRenderer.material.color = Color.Lerp(currentColor, Color.black, currentRadius / maxChamberRadius);
+            // Smoothly shift current tracking alpha down to fully transparent
+            currentColor.a = energyDecayFactor * 0.4f; 
+            
+            // Shift color spectrum hue darker toward black over distance
+            waveRenderer.material.color = Color.Lerp(currentColor, Color.black, currentRadius / boundZ);
 
-            if (currentRadius >= maxChamberRadius)
+            // Task 8: Accurate Rectangular Chamber Wall Absorption Bounds Checking
+            // Checks if the sphere boundary edge breaches any flat planar coordinate wall line
+            if (currentRadius >= boundX || currentRadius >= boundY || currentRadius >= boundZ)
             {
                 deadWaves.Add(wave);
             }
         }
 
+        // Clean boundary-violating frozen slices safely out of active GPU runtime memory
         foreach (GameObject expiredWave in deadWaves)
         {
             activeWaves.Remove(expiredWave);
