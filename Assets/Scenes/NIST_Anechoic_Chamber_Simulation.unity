@@ -838,8 +838,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   wavePrefab: {fileID: 3073009176411264582, guid: 6c5e3d34702ceb8c893e37986432e203, type: 3}
-  waveGenerationInterval: 0.15
-  simulationSpeedMultiplier: 0.008
 --- !u!82 &960764571
 AudioSource:
   m_ObjectHideFlags: 0

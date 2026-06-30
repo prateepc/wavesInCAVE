@@ -11,11 +11,11 @@ public class AdvancedWaveManager : MonoBehaviour
     
     [Header("Simulation Timing")]
     [Tooltip("Time in seconds between each frozen snapshot layer creation.")]
-    public float waveGenerationInterval = 0.25f; 
+    private float waveGenerationInterval = 0.75f; 
 
     [Header("Acoustic Physics Settings")]
     [Tooltip("Slowing down velocity so human eyes can track wave propagation in the CAVE.")]
-    public float simulationSpeedMultiplier = 0.008f; 
+    private float simulationSpeedMultiplier = 0.001f; 
 
     private int targetFrequency = 440; 
     private AudioSource audioSource;
