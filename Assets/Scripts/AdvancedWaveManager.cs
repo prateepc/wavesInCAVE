@@ -2,23 +2,28 @@ using System.IO;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
-using TMPro; // Crucial library addition for TextMeshPro support
+using TMPro;
 
 [RequireComponent(typeof(AudioSource))]
 public class AdvancedWaveManager : MonoBehaviour 
 {
+    // New Enum to define simulation states
+    public enum SimulationMode { Continuous, FreezeFrame }
+
+    [Header("Simulation Mode Settings")]
+    [Tooltip("Press SPACE during runtime to toggle between Continuous and Freeze Frame modes.")]
+    public SimulationMode currentMode = SimulationMode.Continuous;
+
     [Header("UI Display Link")]
-    [Tooltip("Drag your TelemetryDisplay UI Text object into this slot via the Unity Inspector.")]
     public TextMeshProUGUI uiTextDisplay;
 
     [Header("Wave Prefab Link")]
     public GameObject wavePrefab;
 
     [Header("Simulation Timing")]
-    private float waveGenerationInterval = 0.75f;
+    private float waveGenerationInterval = 2f;
 
     [Header("Acoustic Physics Settings")]
-    [Tooltip("Slowing down velocity so human eyes can track wave propagation in the CAVE.")]
     private float simulationSpeedMultiplier = 0.001f;
     private int targetFrequency = 440;
     
@@ -30,53 +35,143 @@ public class AdvancedWaveManager : MonoBehaviour
     private float waveTimer = 0f;
     private bool dataLoaded = false;
     private float maxDistanceToFurthestCorner = 0f;
-    private float maxCSV_RMS = 0.001f; // Safeguard against division by zero
-    private float liveTrackingRMS = 0f; // Stores the current real-time RMS for the UI
+    private float maxCSV_RMS = 0.001f; 
+    private float liveTrackingRMS = 0f; 
 
-    // Hardcoded Absolute Structural Boundaries based on your precise 3D model list
-    private Vector3 chamberMin = new Vector3(-3.35f, 0.00f, -5.00f); // Floor Y=0, Left X=-3.35, Front Z=-5
-    private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);  // Ceiling Y=6.7, Right X=3.35, Back Z=5
+    private Vector3 chamberMin = new Vector3(-3.35f, 0.00f, -5.00f); 
+    private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);  
 
-void Start() 
-{
-    audioSource = GetComponent<AudioSource>();
-    
-    // Calculate maximum travel distance from your point source (0, 1.6, -3.35) to the furthest room corner
-    maxDistanceToFurthestCorner = CalculateMaxCornerDistance();
-
-    // AUTO-LINK PIPELINE FIX: 
-    // If the inspector slot is empty, the script searches the active scene for "TelemetryDisplay"
-    if (uiTextDisplay == null)
+    void Start() 
     {
-        GameObject foundUIObject = GameObject.Find("TelemetryDisplay");
-        if (foundUIObject != null)
+        audioSource = GetComponent<AudioSource>();
+        maxDistanceToFurthestCorner = CalculateMaxCornerDistance();
+
+        if (uiTextDisplay == null)
         {
-            uiTextDisplay = foundUIObject.GetComponent<TextMeshProUGUI>();
+            GameObject foundUIObject = GameObject.Find("TelemetryDisplay");
+            if (foundUIObject != null)
+            {
+                uiTextDisplay = foundUIObject.GetComponent<TextMeshProUGUI>();
+            }
+        }
+
+        AutomatePipelineDiscovery();
+    }
+
+    void Update() 
+    {
+        // Simple runtime action toggle: Press Spacebar to swap modes
+        if (Input.GetKeyDown(KeyCode.Space))
+        {
+            ToggleSimulationMode();
+        }
+
+        UpdateUIScreen(); 
+
+        if (!dataLoaded) return; 
+
+        // Physics behavior splits based on selected mode
+        if (currentMode == SimulationMode.Continuous)
+        {
+            waveTimer += Time.deltaTime;
+            if (waveTimer >= waveGenerationInterval) 
+            {
+                EmitWaveSnapshot();
+                waveTimer = 0f;
+            }
+            ProcessWavePhysics();
         }
     }
 
-    AutomatePipelineDiscovery();
-}
-
-
-void Update() 
-{
-    // FIX: Move the UI text block here so it renders even while data is initializing!
-    UpdateUIScreen(); 
-
-    if (!dataLoaded) return; // Physics loop waits here for the CSV, but the text box will now update!
-
-    waveTimer += Time.deltaTime;
-    
-    if (waveTimer >= waveGenerationInterval) 
+    /// <summary>
+    /// Swaps the mode at runtime and handles clearing out or generating old waves.
+    /// </summary>
+    public void ToggleSimulationMode()
     {
-        EmitWaveSnapshot();
-        waveTimer = 0f;
+        // Clear old waves to cleanly transition states
+        ClearActiveWaves();
+
+        if (currentMode == SimulationMode.Continuous)
+        {
+            currentMode = SimulationMode.FreezeFrame;
+            // Generate the 10 static frozen shells instantly
+            EmitFreezeFrameWaves();
+        }
+        else
+        {
+            currentMode = SimulationMode.Continuous;
+            waveTimer = 0f; // Reset continuous timer
+        }
     }
 
-    ProcessWavePhysics();
-}
+    private void ClearActiveWaves()
+    {
+        foreach (GameObject wave in activeWaves)
+        {
+            if (wave != null) Destroy(wave);
+        }
+        activeWaves.Clear();
+    }
 
+    /// <summary>
+    /// Spawns 10 static wave frames frozen at distances calculated from speed of sound.
+    /// </summary>
+    void EmitFreezeFrameWaves()
+    {
+        if (wavePrefab == null) return;
+
+        // Base color calculation
+        float logFreq = Mathf.Log10(targetFrequency);
+        float normFreq = Mathf.InverseLerp(Mathf.Log10(20f), Mathf.Log10(20000f), logFreq);
+        Color pristineBaseColor = Color.HSVToRGB(normFreq * 0.85f, 0.9f, 0.9f);
+        float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
+
+        // Time step intervals representing a wave moving out at 343 m/s.
+        // We divide max room depth into 10 steps.
+        float totalTimeForMaxDepth = roomFadeMaxDistance / 343f;
+        float timeStep = totalTimeForMaxDepth / 10f;
+
+        for (int i = 1; i <= 10; i++)
+        {
+            // Calculate frozen snapshot physical radius 
+            float targetTime = i * timeStep;
+            float frozenRadius = 343f * targetTime; 
+
+            // Instantiate and size the shell instantly
+            GameObject frozenWave = Instantiate(wavePrefab, transform.position, Quaternion.identity);
+            frozenWave.transform.localScale = new Vector3(frozenRadius * 2f, frozenRadius * 2f, frozenRadius * 2f);
+
+            // Apply static color and telemetry calculation once
+            Renderer waveRenderer = frozenWave.GetComponent<Renderer>();
+            if (waveRenderer != null)
+            {
+                Material waveMat = waveRenderer.material; 
+                waveMat.SetVector("_ChamberMin", new Vector4(chamberMin.x, chamberMin.y, chamberMin.z, 0f));
+                waveMat.SetVector("_ChamberMax", new Vector4(chamberMax.x, chamberMax.y, chamberMax.z, 0f));
+
+                float distanceProgress = Mathf.Clamp01(frozenRadius / roomFadeMaxDistance);
+                float amplitudeModifier = 1.0f;
+
+                if (csvRMS.Count > 0)
+                {
+                    int telemetryIndex = Mathf.FloorToInt(distanceProgress * (csvRMS.Count - 1));
+                    telemetryIndex = Mathf.Clamp(telemetryIndex, 0, csvRMS.Count - 1);
+                    amplitudeModifier = csvRMS[telemetryIndex] / maxCSV_RMS;
+                }
+
+                Color runtimeColor = pristineBaseColor;
+                float distanceDecay = Mathf.Clamp01(1.0f - distanceProgress);
+                runtimeColor.a = amplitudeModifier * distanceDecay * 0.65f;
+
+                Color targetFadeColor = new Color(0.0f, 0.0f, 0.0f, runtimeColor.a);
+                float decayBlendFactor = Mathf.Clamp01((1.0f - amplitudeModifier) + (distanceProgress * 0.2f));
+                
+                waveRenderer.material.color = Color.Lerp(runtimeColor, targetFadeColor, decayBlendFactor);
+            }
+
+            activeWaves.Add(frozenWave);
+        }
+    }
 
     private float CalculateMaxCornerDistance()
     {
@@ -121,7 +216,6 @@ void Update()
         if (int.TryParse(cleanName, out int parsedFreq)) 
         {
             targetFrequency = parsedFreq;
-            Debug.Log("🤖 Automation Engine: Operating at -> " + targetFrequency + "Hz");
         }
 
         string[] dataLines = File.ReadAllLines(targetCSVPath);
@@ -136,7 +230,6 @@ void Update()
                 csvRadii.Add(radius);
                 csvRMS.Add(rms);
 
-                // Track highest recorded RMS peak value to establish normal bounds
                 if (rms > maxCSV_RMS)
                 {
                     maxCSV_RMS = rms;
@@ -162,6 +255,7 @@ void Update()
             }
         }
     }
+
     void EmitWaveSnapshot() 
     {
         if (wavePrefab == null) return;
@@ -173,7 +267,6 @@ void Update()
         if (waveRenderer != null)
         {
             Material waveMat = waveRenderer.material; 
-            // Pass absolute structural limits down to the shader layout
             waveMat.SetVector("_ChamberMin", new Vector4(chamberMin.x, chamberMin.y, chamberMin.z, 0f));
             waveMat.SetVector("_ChamberMax", new Vector4(chamberMax.x, chamberMax.y, chamberMax.z, 0f));
         }
@@ -181,111 +274,83 @@ void Update()
         activeWaves.Add(newWave);
     }
 
-void ProcessWavePhysics() 
-{
-    List<GameObject> deadWaves = new List<GameObject>();
-
-    // Generate base frequency target color cleanly outside the loop
-    float logFreq = Mathf.Log10(targetFrequency);
-    float normFreq = Mathf.InverseLerp(Mathf.Log10(20f), Mathf.Log10(20000f), logFreq);
-    Color pristineBaseColor = Color.HSVToRGB(normFreq * 0.85f, 0.9f, 0.9f);
-
-    // Tracker variable to send the active wave data up to the text display
-    float sampleRMS = 0f;
-
-    for (int i = 0; i < activeWaves.Count; i++) 
+    void ProcessWavePhysics() 
     {
-        GameObject wave = activeWaves[i];
-        if (wave == null) continue;
+        List<GameObject> deadWaves = new List<GameObject>();
 
-        // Expand scale outward continuously using human-readable velocity metrics
-        float currentRadius = wave.transform.localScale.x / 2f;
-        currentRadius += 343f * Time.deltaTime * simulationSpeedMultiplier;
-        wave.transform.localScale = new Vector3(currentRadius * 2f, currentRadius * 2f, currentRadius * 2f);
+        float logFreq = Mathf.Log10(targetFrequency);
+        float normFreq = Mathf.InverseLerp(Mathf.Log10(20f), Mathf.Log10(20000f), logFreq);
+        Color pristineBaseColor = Color.HSVToRGB(normFreq * 0.85f, 0.9f, 0.9f);
 
-        Renderer waveRenderer = wave.GetComponent<Renderer>();
-        if (waveRenderer != null)
+        float sampleRMS = 0f;
+
+        for (int i = 0; i < activeWaves.Count; i++) 
         {
-            // FIX: Map progress against the total structural depth of the chamber (boundZ * 2 = 10m)
-            // This allows the full length of your Python telemetry dataset to play out over the room distance.
-            float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
-            float distanceProgress = Mathf.Clamp01(currentRadius / roomFadeMaxDistance);
+            GameObject wave = activeWaves[i];
+            if (wave == null) continue;
 
-            // DEFAULT TELEMETRY FALLBACK VALUES
-            float amplitudeModifier = 1.0f;
+            float currentRadius = wave.transform.localScale.x / 2f;
+            currentRadius += 343f * Time.deltaTime * simulationSpeedMultiplier;
+            wave.transform.localScale = new Vector3(currentRadius * 2f, currentRadius * 2f, currentRadius * 2f);
 
-            // DATA INTEGRATION LINK:
-            // Find matching index in our telemetry array based on expanding radius progress
-            if (csvRMS.Count > 0)
+            Renderer waveRenderer = wave.GetComponent<Renderer>();
+            if (waveRenderer != null)
             {
-                int telemetryIndex = Mathf.FloorToInt(distanceProgress * (csvRMS.Count - 1));
-                telemetryIndex = Mathf.Clamp(telemetryIndex, 0, csvRMS.Count - 1);
+                float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
+                float distanceProgress = Mathf.Clamp01(currentRadius / roomFadeMaxDistance);
+                float amplitudeModifier = 1.0f;
 
-                // Track active loop index to display on UI overlay text screen
-                sampleRMS = csvRMS[telemetryIndex];
+                if (csvRMS.Count > 0)
+                {
+                    int telemetryIndex = Mathf.FloorToInt(distanceProgress * (csvRMS.Count - 1));
+                    telemetryIndex = Mathf.Clamp(telemetryIndex, 0, csvRMS.Count - 1);
+                    sampleRMS = csvRMS[telemetryIndex];
+                    amplitudeModifier = sampleRMS / maxCSV_RMS;
+                }
 
-                // Normalize amplitude against peak data threshold (0.0 to 1.0 scale range)
-                amplitudeModifier = sampleRMS / maxCSV_RMS;
+                Color runtimeColor = pristineBaseColor;
+                float distanceDecay = Mathf.Clamp01(1.0f - distanceProgress);
+                runtimeColor.a = amplitudeModifier * distanceDecay * 0.65f;
+
+                Color targetFadeColor = new Color(0.0f, 0.0f, 0.0f, runtimeColor.a);
+                float decayBlendFactor = Mathf.Clamp01((1.0f - amplitudeModifier) + (distanceProgress * 0.2f));
+                waveRenderer.material.color = Color.Lerp(runtimeColor, targetFadeColor, decayBlendFactor);
             }
 
-            // Apply telemetry values directly to properties
-            Color runtimeColor = pristineBaseColor;
-
-            // PHYSICAL TUNING: 
-            // Forces the transparency to continuously increase over distance.
-            // Opacity is driven by raw CSV amplitude modulated by a continuous distance decay factor.
-            float distanceDecay = Mathf.Clamp01(1.0f - distanceProgress);
-            runtimeColor.a = amplitudeModifier * distanceDecay * 0.65f; // Boosted baseline multiplier
-
-            // Brightness decays organically into black based on telemetry level drops
-            Color targetFadeColor = new Color(0.0f, 0.0f, 0.0f, runtimeColor.a);
-
-            // Combines physical distance decay with raw telemetry modulation
-            float decayBlendFactor = Mathf.Clamp01((1.0f - amplitudeModifier) + (distanceProgress * 0.2f));
-            waveRenderer.material.color = Color.Lerp(runtimeColor, targetFadeColor, decayBlendFactor);
+            if (currentRadius >= maxDistanceToFurthestCorner) 
+            {
+                deadWaves.Add(wave);
+            }
         }
 
-        // Remove tracking container safely when it expands past the furthest possible corner point
-        if (currentRadius >= maxDistanceToFurthestCorner) 
+        if (activeWaves.Count > 0)
         {
-            deadWaves.Add(wave);
+            liveTrackingRMS = sampleRMS;
+        }
+        else
+        {
+            liveTrackingRMS = 0f;
+        }
+
+        foreach (GameObject expiredWave in deadWaves) 
+        {
+            activeWaves.Remove(expiredWave);
+            Destroy(expiredWave);
         }
     }
 
-    // Pipe the latest live data value up to the tracking text interface loop
-    if (activeWaves.Count > 0)
+    void UpdateUIScreen()
     {
-        liveTrackingRMS = sampleRMS;
-    }
-    else
-    {
-        liveTrackingRMS = 0f;
-    }
+        if (uiTextDisplay == null) return;
 
-    foreach (GameObject expiredWave in deadWaves) 
-    {
-        activeWaves.Remove(expiredWave);
-        Destroy(expiredWave);
+        string frequencyText = dataLoaded ? $"{targetFrequency} Hz" : "Loading CSV...";
+        string amplitudeText = dataLoaded ? liveTrackingRMS.ToString("F5") : "0.00000";
+        int activeShellsCount = activeWaves != null ? activeWaves.Count : 0;
+
+        uiTextDisplay.text = $"<b>NIST CHAMBER TELEMETRY</b>\n" +
+                             $"Simulation Mode: {currentMode}\n" +
+                             $"Target Frequency: {frequencyText}\n" +
+                             $"Live Front Amplitude: {amplitudeText} RMS\n" +
+                             $"Active Wave Shells: {activeShellsCount}";
     }
 }
-
-
-void UpdateUIScreen()
-{
-    // Safety check to ensure the UI Text slot isn't empty
-    if (uiTextDisplay == null) return;
-
-    // Direct initialization safeties
-    string frequencyText = dataLoaded ? $"{targetFrequency} Hz" : "Loading CSV...";
-    string amplitudeText = dataLoaded ? liveTrackingRMS.ToString("F5") : "0.00000";
-    int activeShellsCount = activeWaves != null ? activeWaves.Count : 0;
-
-    // Update screen canvas
-    uiTextDisplay.text = $"<b>NIST CHAMBER TELEMETRY</b>\n" +
-                         $"Target Frequency: {frequencyText}\n" +
-                         $"Live Front Amplitude: {amplitudeText} RMS\n" +
-                         $"Active Wave Shells: {activeShellsCount}";
-}
-
-}
-
