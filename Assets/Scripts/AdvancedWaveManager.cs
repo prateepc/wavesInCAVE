@@ -1,6 +1,7 @@
 using System.IO;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 using UnityEngine.Networking;
 using TMPro;
 
@@ -13,59 +14,63 @@ public class AdvancedWaveManager : MonoBehaviour
     [Tooltip("Press SPACE during runtime to toggle between Continuous and Freeze Frame modes.")]
     public SimulationMode currentMode = SimulationMode.Continuous;
 
-    [Header("UI Display Link")]
+    [Header("UI Display Links")]
     public TextMeshProUGUI uiTextDisplay;
+    
+    [Header("Dynamic Legend UI Overlay Links")]
+    public RawImage legendColorBar;
+    public TextMeshProUGUI minFreqLabel;
+    public TextMeshProUGUI quarterFreqLabel; 
+    public TextMeshProUGUI midFreqLabel;
+    public TextMeshProUGUI threeQuarterFreqLabel; 
+    public TextMeshProUGUI maxFreqLabel;
+
+    [Header("Hover Tooltip UI Elements")]
+    public GameObject tooltipPanel;
+    public TextMeshProUGUI tooltipText;
+    public Transform caveWandPointer;
 
     [Header("Wave Prefab Link")]
-    [Tooltip("The base sphere prefab used for all nested acoustic wavefront visualizations.")]
+    [Tooltip("The base sphere prefab used for all visual wave shells.")]
     public GameObject wavePrefab;
 
     [Header("Visual Tuning Layout")]
-    [Tooltip("Controls how intensely loud sounds glow within the CAVE environment.")]
-    public float maxGlowIntensity = 5.0f;
+    public float maxGlowIntensity = 4.0f;
 
     [Header("Constant Translucency Settings")]
-    [Range(0f, 1f)] public float fundamentalAlpha = 0.85f;
-    [Range(0f, 1f)] public float harmonicAlpha = 0.60f;
+    [Range(0f, 1f)] public float fundamentalAlpha = 0.50f;
+    [Range(0f, 1f)] public float harmonicAlpha = 0.40f;
 
     [Header("Simulation Timing")]
-    [SerializeField] private float waveGenerationInterval = 1.5f;
+    private float waveGenerationInterval = 2f;
 
     [Header("Acoustic Physics Settings")]
-    [SerializeField] private float simulationSpeedMultiplier = 1.0f; 
-
+    private float simulationSpeedMultiplier = 0.001f;
+    private int targetFrequency = 440;
+    
     private AudioSource audioSource;
     private List<GameObject> activeWaves = new List<GameObject>();
-
-    // Zero-allocation parallel data arrays from Python pipeline
-    private List<float> csvTimestamps = new List<float>();
+    
     private List<float> csvRadii = new List<float>();
-    private List<int> csvPrincipalFreqs = new List<int>();
-    private List<float> csvP0Pressures = new List<float>();
-    private List<float> csvH1Pressures = new List<float>();
-    private List<float> csvH2Pressures = new List<float>();
-    private List<float> csvH3Pressures = new List<float>();
-
+    private List<float> csvFundamentalRMS = new List<float>();
+    private List<float> csvHarmonicRMS = new List<float>();
+    private List<int> csvFrequencies = new List<int>(); 
+    
     private float waveTimer = 0f;
     private bool dataLoaded = false;
     private float maxDistanceToFurthestCorner = 0f;
+    
+    private float maxFundRMS = 0.001f; 
+    private float maxHarmRMS = 0.001f; 
+    
+    private float liveFundamentalRMS = 0f; 
+    private float liveHarmonicRMS = 0f;
 
-    // Peak tracking for dynamic visual normalization
-    private float maxP0 = 0.001f;
-    private float maxH1 = 0.001f;
-    private float maxH2 = 0.001f;
-    private float maxH3 = 0.001f;
+    private Vector3 chamberMin = new Vector3(-3.35f, 0.00f, -5.00f); 
+    private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);  
 
-    // Live runtime tracking metrics for UI Canvas
-    private int liveFrequency = 0;
-    private float liveP0 = 0f;
-    private float liveH1 = 0f;
-    private float liveH2 = 0f;
-    private float liveH3 = 0f;
-
-    // Hardcoded Absolute Structural Boundaries based on your precise 3D model list
-    private Vector4 chamberMin = new Vector4(-3.35f, 0.00f, -5.00f, 0f);
-    private Vector4 chamberMax = new Vector4(3.35f, 6.70f, 5.00f, 0f);
+    private const float pipelineMinFreq = 20f;
+    private const float pipelineMaxFreq = 20000f;
 
     void Start()
     {
@@ -78,29 +83,32 @@ public class AdvancedWaveManager : MonoBehaviour
             if (foundUIObject != null) uiTextDisplay = foundUIObject.GetComponent<TextMeshProUGUI>();
         }
 
+        if (tooltipPanel != null) tooltipPanel.SetActive(false);
+
+        StartCoroutine(InitializeLegendUI());
         AutomatePipelineDiscovery();
     }
+
     void Update()
     {
-        if (Input.GetKeyDown(KeyCode.Space))
-        {
-            ToggleSimulationMode();
-        }
+        if (Input.GetKeyDown(KeyCode.Space)) ToggleSimulationMode();
 
-        UpdateUIScreen();
+        UpdateUIScreen(); 
 
-        if (!dataLoaded) return;
+        if (!dataLoaded) return; 
 
         if (currentMode == SimulationMode.Continuous)
         {
             waveTimer += Time.deltaTime;
-            if (waveTimer >= waveGenerationInterval)
+            if (waveTimer >= waveGenerationInterval) 
             {
                 EmitCompoundWaveSnapshot();
                 waveTimer = 0f;
             }
             ProcessWavePhysics();
         }
+
+        HandleWaveInterrogation();
     }
 
     public void ToggleSimulationMode()
@@ -114,7 +122,7 @@ public class AdvancedWaveManager : MonoBehaviour
         else
         {
             currentMode = SimulationMode.Continuous;
-            waveTimer = 0f;
+            waveTimer = 0f; 
         }
     }
 
@@ -127,179 +135,329 @@ public class AdvancedWaveManager : MonoBehaviour
         activeWaves.Clear();
     }
 
-    /// <summary>
-    /// Spawns an isotropic fundamental root wavefront containing 3 independent nested harmonic shells.
-    /// </summary>
-    void EmitCompoundWaveSnapshot()
+    System.Collections.IEnumerator InitializeLegendUI()
+    {
+        yield return new WaitForEndOfFrame();
+
+        if (legendColorBar != null)
+        {
+            Texture2D texture = new Texture2D(1, 512);
+            texture.wrapMode = TextureWrapMode.Clamp;
+
+            for (int y = 0; y < 512; y++)
+            {
+                float progress = (float)y / 511f;
+                Color pixelColor = Color.HSVToRGB(progress * 0.85f, 0.9f, 0.9f);
+                texture.SetPixel(0, y, pixelColor);
+            }
+            texture.Apply();
+            legendColorBar.texture = texture;
+        }
+
+        if (minFreqLabel != null) minFreqLabel.text = $"{pipelineMinFreq} Hz";
+        if (maxFreqLabel != null) maxFreqLabel.text = $"{pipelineMaxFreq} Hz";
+
+        float logMin = Mathf.Log10(pipelineMinFreq);     
+        float logMax = Mathf.Log10(pipelineMaxFreq);     
+        float logRange = logMax - logMin;
+
+        if (quarterFreqLabel != null)
+        {
+            float logQ1 = logMin + logRange * 0.25f;
+            quarterFreqLabel.text = $"{Mathf.RoundToInt(Mathf.Pow(10f, logQ1))} Hz";
+        }
+
+        if (midFreqLabel != null)
+        {
+            float logMid = logMin + logRange * 0.50f;
+            midFreqLabel.text = $"{Mathf.RoundToInt(Mathf.Pow(10f, logMid))} Hz";
+        }
+
+        if (threeQuarterFreqLabel != null)
+        {
+            float logQ3 = logMin + logRange * 0.75f;
+            threeQuarterFreqLabel.text = $"{Mathf.RoundToInt(Mathf.Pow(10f, logQ3))} Hz";
+        }
+    }
+
+    void EmitCompoundWaveSnapshot() 
     {
         if (wavePrefab == null) return;
 
-        // 1. Spawn Core Principal Wavefront (f0 Root)
-        GameObject fundamentalRoot = Instantiate(wavePrefab, transform.position, Quaternion.identity);
-        fundamentalRoot.name = "Acoustic_Root_f0";
-        fundamentalRoot.transform.localScale = Vector3.one * 0.01f;
-        ConfigureShaderBoundaries(fundamentalRoot);
+        // 1. Spawn Fundamental Wave
+        GameObject fundamentalWave = Instantiate(wavePrefab, transform.position, Quaternion.identity);
+        fundamentalWave.name = "Fundamental_1f";
+        fundamentalWave.transform.localScale = new Vector3(0.1f, 0.1f, 0.1f);
+        ConfigureShaderBoundaries(fundamentalWave);
+        
+        // --- ADDED RIGHT HERE ---
+        fundamentalWave.layer = 8; 
 
-        // 2. Spawn 3 Concentric Internal Harmonics
-        string[] harmonicNames = { "Harmonic_Shell_2f0", "Harmonic_Shell_3f0", "Harmonic_Shell_4f0" };
-        for (int i = 0; i < 3; i++)
+        WaveDataIdentifier id1 = fundamentalWave.AddComponent<WaveDataIdentifier>();
+        id1.waveFrequency = targetFrequency;
+        id1.harmonicOrder = "1f Fundamental";
+
+        // 2. Your existing Harmonic Loop
+        for (int order = 2; order <= 4; order++)
         {
-            GameObject harmonicChild = Instantiate(wavePrefab, transform.position, Quaternion.identity);
-            harmonicChild.name = harmonicNames[i];
-            harmonicChild.transform.SetParent(fundamentalRoot.transform);
-            harmonicChild.transform.localPosition = Vector3.zero;
-            harmonicChild.transform.localRotation = Quaternion.identity;
-            
-            // Offset scales slightly so shells don't clip visually on top of each other
-            harmonicChild.transform.localScale = Vector3.one * (0.98f - (i * 0.05f));
-            ConfigureShaderBoundaries(harmonicChild);
+            GameObject harmonicWave = Instantiate(wavePrefab, transform.position, Quaternion.identity);
+            harmonicWave.name = $"Harmonic_{order}f";
+            harmonicWave.transform.SetParent(fundamentalWave.transform);
+            harmonicWave.transform.localPosition = Vector3.zero;
+            harmonicWave.transform.localRotation = Quaternion.identity;
+            harmonicWave.transform.localScale = Vector3.one * (1.0f + (order - 1) * 0.005f); 
+            ConfigureShaderBoundaries(harmonicWave);
+
+            // --- ADDED RIGHT HERE INSIDE THE EXISTING LOOP ---
+            harmonicWave.layer = 9; 
+
+            WaveDataIdentifier idH = harmonicWave.AddComponent<WaveDataIdentifier>();
+            idH.waveFrequency = targetFrequency * order;
+            idH.harmonicOrder = $"{order}f Harmonic";
         }
 
-        activeWaves.Add(fundamentalRoot);
+        activeWaves.Add(fundamentalWave);
     }
-    void ProcessWavePhysics()
+
+    void ProcessWavePhysics() 
     {
         List<GameObject> deadWaves = new List<GameObject>();
         float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
 
-        for (int i = 0; i < activeWaves.Count; i++)
-        {
-            GameObject rootWave = activeWaves[i];
-            if (rootWave == null) continue;
+        float trackingFundRMS = 0f;
+        float trackingHarmRMS = 0f;
 
-            // Expand radius isotropically using speed of sound equations
-            float currentRadius = rootWave.transform.localScale.x / 2f;
+        for (int i = 0; i < activeWaves.Count; i++) 
+        {
+            GameObject fundWave = activeWaves[i];
+            if (fundWave == null) continue;
+
+            float currentRadius = fundWave.transform.localScale.x / 2f;
             currentRadius += 343f * Time.deltaTime * simulationSpeedMultiplier;
-            rootWave.transform.localScale = Vector3.one * (currentRadius * 2f);
+            fundWave.transform.localScale = new Vector3(currentRadius * 2f, currentRadius * 2f, currentRadius * 2f);
 
             float distanceProgress = Mathf.Clamp01(currentRadius / roomFadeMaxDistance);
             float distanceDecay = Mathf.Clamp01(1.0f - distanceProgress);
 
-            // Isolate matching data array indices based on spatial position history
-            if (csvTimestamps.Count > 0)
+            float fundAmpModifier = 0.0f;
+            float harmAmpModifier = 0.0f;
+            int liveBaseFrequency = targetFrequency;
+
+            if (csvFundamentalRMS.Count > 0)
             {
-                int idx = Mathf.FloorToInt(distanceProgress * (csvTimestamps.Count - 1));
-                idx = Mathf.Clamp(idx, 0, csvTimestamps.Count - 1);
+                int index = Mathf.FloorToInt(distanceProgress * (csvFundamentalRMS.Count - 1));
+                index = Mathf.Clamp(index, 0, csvFundamentalRMS.Count - 1);
 
-                liveFrequency = csvPrincipalFreqs[idx];
-                liveP0 = csvP0Pressures[idx];
-                liveH1 = csvH1Pressures[idx];
-                liveH2 = csvH2Pressures[idx];
-                liveH3 = csvH3Pressures[idx];
+                trackingFundRMS = csvFundamentalRMS[index];
+                trackingHarmRMS = csvHarmonicRMS[index];
+                if (csvFrequencies.Count > index) liveBaseFrequency = csvFrequencies[index];
 
-                // Normalize pressures across recorded local maximum boundaries
-                float normP0 = liveP0 / maxP0;
-                float normH1 = liveH1 / maxH1;
-                float normH2 = liveH2 / maxH2;
-                float normH3 = liveH3 / maxH3;
+                fundAmpModifier = trackingFundRMS / maxFundRMS;
+                harmAmpModifier = trackingHarmRMS / maxHarmRMS;
+            }
 
-                // Color shifts driven directly by tracking real-time frequency changes
-                float logFreq = Mathf.Log10(Mathf.Clamp(liveFrequency, 20, 20000));
-                float normFreq = Mathf.InverseLerp(Mathf.Log10(20f), Mathf.Log10(2000f), logFreq);
-                Color cP0 = Color.HSVToRGB(normFreq * 0.85f, 0.9f, 0.9f);
-                Color cH1 = Color.cyan;
-                Color cH2 = Color.magenta;
-                Color cH3 = Color.red;
+            WaveDataIdentifier fundId = fundWave.GetComponent<WaveDataIdentifier>();
+            if (fundId != null) fundId.waveFrequency = liveBaseFrequency;
 
-                // Fire rendering states directly to Root and Nested Child Renderers
-                UpdateShellRenderer(rootWave, cP0, normP0, fundamentalAlpha, distanceDecay, new Vector4(liveP0, liveH1, liveH2, liveH3));
-                
-                if (rootWave.transform.childCount >= 3)
+            float logFreq = Mathf.Log10(liveBaseFrequency);
+            float normFreq = Mathf.InverseLerp(Mathf.Log10(pipelineMinFreq), Mathf.Log10(pipelineMaxFreq), logFreq);
+            Color baseFundamentalColor = Color.HSVToRGB(normFreq * 0.85f, 0.9f, 0.9f); 
+
+            foreach (Transform child in fundWave.transform)
+            {
+                WaveDataIdentifier childId = child.GetComponent<WaveDataIdentifier>();
+                int childOrderNum = 2;
+                if (child.name.Contains("3f")) childOrderNum = 3;
+                if (child.name.Contains("4f")) childOrderNum = 4;
+
+                if (childId != null) childId.waveFrequency = liveBaseFrequency * childOrderNum;
+
+                float physicalShellGap = 1.0f + ((childOrderNum - 1) * 0.005f) + (harmAmpModifier * 0.02f * (childOrderNum - 1));
+                child.transform.localScale = Vector3.one * physicalShellGap;
+
+                Renderer harmRenderer = child.GetComponent<Renderer>();
+                if (harmRenderer != null)
                 {
-                    UpdateShellRenderer(rootWave.transform.GetChild(0).gameObject, cH1, normH1, harmonicAlpha, distanceDecay, new Vector4(liveP0, liveH1, liveH2, liveH3));
-                    UpdateShellRenderer(rootWave.transform.GetChild(1).gameObject, cH2, normH2, harmonicAlpha, distanceDecay, new Vector4(liveP0, liveH1, liveH2, liveH3));
-                    UpdateShellRenderer(rootWave.transform.GetChild(2).gameObject, cH3, normH3, harmonicAlpha, distanceDecay, new Vector4(liveP0, liveH1, liveH2, liveH3));
+                    harmRenderer.material.EnableKeyword("_EMISSION");
+                    Color harmColor = (childOrderNum == 2) ? Color.magenta : (childOrderNum == 3) ? Color.cyan : Color.yellow;
+                    harmColor.a = harmonicAlpha * distanceDecay; 
+                    harmRenderer.material.color = harmColor;
+                    harmRenderer.material.SetColor("_EmissionColor", harmColor * harmAmpModifier * maxGlowIntensity * distanceDecay);
                 }
             }
 
-            if (currentRadius >= maxDistanceToFurthestCorner)
+            Renderer fundRenderer = fundWave.GetComponent<Renderer>();
+            if (fundRenderer != null)
             {
-                deadWaves.Add(rootWave);
+                fundRenderer.material.EnableKeyword("_EMISSION");
+                Color fundColor = baseFundamentalColor;
+                fundColor.a = fundamentalAlpha * distanceDecay; 
+                fundRenderer.material.color = fundColor;
+                fundRenderer.material.SetColor("_EmissionColor", baseFundamentalColor * fundAmpModifier * maxGlowIntensity * distanceDecay);
             }
+
+            if (currentRadius >= maxDistanceToFurthestCorner) deadWaves.Add(fundWave);
         }
 
-        // Clean up structures that expanded out past CAVE architecture
-        foreach (GameObject expiredWave in deadWaves)
+        liveFundamentalRMS = (activeWaves.Count > 0) ? trackingFundRMS : 0f;
+        liveHarmonicRMS = (activeWaves.Count > 0) ? trackingHarmRMS : 0f;
+
+        foreach (GameObject expiredWave in deadWaves) 
         {
             activeWaves.Remove(expiredWave);
             Destroy(expiredWave);
         }
     }
-    private void UpdateShellRenderer(GameObject targetObj, Color baseColor, float normPressure, float baseAlpha, float decay, Vector4 combinedPressures)
-    {
-        Renderer r = targetObj.GetComponent<Renderer>();
-        if (r == null) return;
-
-        r.material.EnableKeyword("_EMISSION");
-        
-        baseColor.a = baseAlpha * decay;
-        r.material.color = baseColor;
-
-        // Drive dynamic HDR visual glow using Sound Pressure values
-        Color dynamicEmission = baseColor * normPressure * maxGlowIntensity * decay;
-        r.material.SetColor("_EmissionColor", dynamicEmission);
-
-        // Package all sound pressures into a vector pass to maximize custom GPU pipeline flexibility
-        r.material.SetVector("_AcousticPressures", combinedPressures);
-    }
 
     void EmitFreezeFrameWaves()
     {
-        if (wavePrefab == null || csvTimestamps.Count == 0) return;
+        if (wavePrefab == null || csvFundamentalRMS.Count == 0) return;
 
         float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
-        int totalSnapshots = 8; // Number of static spatial iterations inside the CAVE
+        float totalTimeForMaxDepth = roomFadeMaxDistance / 343f;
+        float timeStep = totalTimeForMaxDepth / 10f;
 
-        for (int i = 1; i <= totalSnapshots; i++)
+        for (int i = 1; i <= 10; i++)
         {
-            float targetProgress = (float)i / totalSnapshots;
-            float frozenRadius = targetProgress * roomFadeMaxDistance;
+            float targetTime = i * timeStep;
+            float frozenRadius = 343f * targetTime; 
 
-            int idx = Mathf.FloorToInt(targetProgress * (csvTimestamps.Count - 1));
-            idx = Mathf.Clamp(idx, 0, csvTimestamps.Count - 1);
+            // 1. Spawn Frozen Fundamental Wave
+            GameObject frozenFundWave = Instantiate(wavePrefab, transform.position, Quaternion.identity);
+            frozenFundWave.name = $"Fundamental_1f_FF_Set_{i}";
+            frozenFundWave.transform.localScale = new Vector3(frozenRadius * 2f, frozenRadius * 2f, frozenRadius * 2f);
+            ConfigureShaderBoundaries(frozenFundWave);
 
-            GameObject fRoot = Instantiate(wavePrefab, transform.position, Quaternion.identity);
-            fRoot.name = $"Frozen_Root_Snapshot_{i}";
-            fRoot.transform.localScale = Vector3.one * (frozenRadius * 2f);
-            ConfigureShaderBoundaries(fRoot);
+            // --- ADDED RIGHT HERE ---
+            frozenFundWave.layer = 8; 
 
-            Color cP0 = Color.HSVToRGB(Mathf.InverseLerp(40, 2000, csvPrincipalFreqs[idx]) * 0.85f, 0.9f, 0.9f);
-            Vector4 pressures = new Vector4(csvP0Pressures[idx], csvH1Pressures[idx], csvH2Pressures[idx], csvH3Pressures[idx]);
+            float distanceProgress = Mathf.Clamp01(frozenRadius / roomFadeMaxDistance);
+            float distanceDecay = Mathf.Clamp01(1.0f - distanceProgress);
             
-            UpdateShellRenderer(fRoot, cP0, csvP0Pressures[idx] / maxP0, fundamentalAlpha, 1.0f - targetProgress, pressures);
+            int dataIndex = Mathf.Clamp(Mathf.FloorToInt(distanceProgress * (csvFundamentalRMS.Count - 1)), 0, csvFundamentalRMS.Count - 1);
+            float fundAmpModifier = csvFundamentalRMS[dataIndex] / maxFundRMS;
+            float harmAmpModifier = csvHarmonicRMS[dataIndex] / maxHarmRMS;
+            
+            int calculatedFreezeFrequency = targetFrequency;
+            if (csvFrequencies.Count > dataIndex) calculatedFreezeFrequency = csvFrequencies[dataIndex];
 
-            // Generate spatial internal nested nodes for snapshot review
-            Color[] hColors = { Color.cyan, Color.magenta, Color.red };
-            float[] hPressures = { csvH1Pressures[idx], csvH2Pressures[idx], csvH3Pressures[idx] };
-            float[] maxHvals = { maxH1, maxH2, maxH3 };
+            WaveDataIdentifier fundId = frozenFundWave.AddComponent<WaveDataIdentifier>();
+            fundId.waveFrequency = calculatedFreezeFrequency;
+            fundId.harmonicOrder = "1f Fundamental";
 
-            for (int h = 0; h < 3; h++)
+            float logFreq = Mathf.Log10(calculatedFreezeFrequency);
+            float normFreq = Mathf.InverseLerp(Mathf.Log10(pipelineMinFreq), Mathf.Log10(pipelineMaxFreq), logFreq);
+            Color baseFundamentalColor = Color.HSVToRGB(normFreq * 0.85f, 0.9f, 0.9f);
+
+            // 2. Your existing Frozen Harmonic Loop
+            for (int order = 2; order <= 4; order++)
             {
-                GameObject hChild = Instantiate(wavePrefab, transform.position, Quaternion.identity);
-                hChild.transform.SetParent(fRoot.transform);
-                hChild.transform.localPosition = Vector3.zero;
-                hChild.transform.localScale = Vector3.one * (0.98f - (h * 0.05f));
-                ConfigureShaderBoundaries(hChild);
+                GameObject frozenHarmWave = Instantiate(wavePrefab, transform.position, Quaternion.identity);
+                frozenHarmWave.name = $"Harmonic_{order}f_FF_Set_{i}";
+                frozenHarmWave.transform.SetParent(frozenFundWave.transform);
+                frozenHarmWave.transform.localPosition = Vector3.zero;
+                frozenHarmWave.transform.localRotation = Quaternion.identity;
+                ConfigureShaderBoundaries(frozenHarmWave);
 
-                UpdateShellRenderer(hChild, hColors[h], hPressures[h] / maxHvals[h], harmonicAlpha, 1.0f - targetProgress, pressures);
+                // --- ADDED RIGHT HERE INSIDE THE EXISTING LOOP ---
+                frozenHarmWave.layer = 9; 
+
+                WaveDataIdentifier harmId = frozenHarmWave.AddComponent<WaveDataIdentifier>();
+                harmId.waveFrequency = calculatedFreezeFrequency * order;
+                harmId.harmonicOrder = $"{order}f Harmonic";
+
+                float frozenShellGap = 1.0f + ((order - 1) * 0.05f) + (harmAmpModifier * 0.02f * (order - 1));
+                frozenHarmWave.transform.localScale = Vector3.one * frozenShellGap;
+
+                Renderer harmRenderer = frozenHarmWave.GetComponent<Renderer>();
+                if (harmRenderer != null)
+                {
+                    harmRenderer.material.EnableKeyword("_EMISSION");
+                    Color c = (order == 2) ? Color.magenta : (order == 3) ? Color.cyan : Color.yellow;
+                    c.a = harmonicAlpha * distanceDecay;
+                    harmRenderer.material.color = c;
+                    harmRenderer.material.SetColor("_EmissionColor", c * harmAmpModifier * maxGlowIntensity * distanceDecay);
+                }
             }
 
-            activeWaves.Add(fRoot);
+            Renderer fundRenderer = frozenFundWave.GetComponent<Renderer>();
+            if (fundRenderer != null)
+            {
+                fundRenderer.material.EnableKeyword("_EMISSION");
+                Color c = baseFundamentalColor;
+                c.a = fundamentalAlpha * distanceDecay;
+                fundRenderer.material.color = c;
+                fundRenderer.material.SetColor("_EmissionColor", baseFundamentalColor * fundAmpModifier * maxGlowIntensity * distanceDecay);
+            }
+
+            activeWaves.Add(frozenFundWave);
         }
     }
+
+    void HandleWaveInterrogation()
+    {
+        if (tooltipPanel == null || tooltipText == null) return;
+
+        Ray ray = (caveWandPointer != null) 
+            ? new Ray(caveWandPointer.position, caveWandPointer.forward) 
+            : Camera.main.ScreenPointToRay(Input.mousePosition);
+
+        RaycastHit hit;
+        
+        // --- ADD LAYER MASK FILTERING ---
+        int layerMask;
+        if (Input.GetKey(KeyCode.LeftShift))
+        {
+            // Only detect objects on Layer 9 (HarmonicWave) when Shift is held
+            layerMask = 1 << 9; 
+        }
+        else
+        {
+            // Only detect objects on Layer 8 (FundamentalWave) by default
+            layerMask = 1 << 8; 
+        }
+
+        // Fire the physics raycast using our targeted layerMask
+        if (Physics.Raycast(ray, out hit, 100f, layerMask, QueryTriggerInteraction.Collide))
+        {
+            WaveDataIdentifier targetedWave = hit.collider.GetComponent<WaveDataIdentifier>();
+
+            if (targetedWave != null && targetedWave.waveFrequency > 0)
+            {
+                tooltipPanel.SetActive(true);
+                
+                if (caveWandPointer != null)
+                {
+                    tooltipPanel.transform.position = Camera.main.WorldToScreenPoint(hit.point);
+                }
+                else
+                {
+                    tooltipPanel.transform.position = Input.mousePosition + new Vector3(20f, 20f, 0f);
+                }
+
+                tooltipText.text = $"<b>{targetedWave.harmonicOrder}</b>\nFreq: {targetedWave.waveFrequency} Hz";
+                return; 
+            }
+        }
+
+        // Hide the box immediately if pointing into blank space or a non-targeted wave layer
+        tooltipPanel.SetActive(false);
+    }
+
     private void ConfigureShaderBoundaries(GameObject waveTarget)
     {
         Renderer r = waveTarget.GetComponent<Renderer>();
         if (r != null)
         {
-            r.material.SetVector("_ChamberMin", chamberMin);
-            r.material.SetVector("_ChamberMax", chamberMax);
+            r.material.SetVector("_ChamberMin", new Vector4(chamberMin.x, chamberMin.y, chamberMin.z, 0f));
+            r.material.SetVector("_ChamberMax", new Vector4(chamberMax.x, chamberMax.y, chamberMax.z, 0f));
         }
     }
 
     private float CalculateMaxCornerDistance()
     {
-        Vector3[] corners = new Vector3[] {
+        Vector3[] corners = new Vector3[]
+        {
             new Vector3(chamberMin.x, chamberMin.y, chamberMin.z),
             new Vector3(chamberMax.x, chamberMin.y, chamberMin.z),
             new Vector3(chamberMin.x, chamberMax.y, chamberMin.z),
@@ -309,6 +467,7 @@ public class AdvancedWaveManager : MonoBehaviour
             new Vector3(chamberMin.x, chamberMax.y, chamberMax.z),
             new Vector3(chamberMax.x, chamberMax.y, chamberMax.z)
         };
+
         float maxDist = 0f;
         foreach (Vector3 corner in corners)
         {
@@ -318,74 +477,58 @@ public class AdvancedWaveManager : MonoBehaviour
         return maxDist;
     }
 
-    void AutomatePipelineDiscovery()
+    void AutomatePipelineDiscovery() 
     {
         string streamingPath = Application.streamingAssetsPath;
-        if (!Directory.Exists(streamingPath))
-        {
-            Debug.LogError("❌ StreamingAssets folder missing entirely from project root!");
-            return;
-        }
-
         string[] discoveredFiles = Directory.GetFiles(streamingPath, "*.csv");
-        if (discoveredFiles.Length == 0)
-        {
-            Debug.LogError("❌ No telemetry CSV datasets found in StreamingAssets!");
-            return;
-        }
+        
+        if (discoveredFiles.Length == 0) return;
 
         System.Array.Sort(discoveredFiles, (a, b) => File.GetLastWriteTime(b).CompareTo(File.GetLastWriteTime(a)));
         string targetCSVPath = discoveredFiles[0];
-        
-        Debug.Log("🤖 CAVE Pipeline Target Initialized: " + Path.GetFileName(targetCSVPath));
+        string baseFileName = Path.GetFileNameWithoutExtension(targetCSVPath);
 
         string[] dataLines = File.ReadAllLines(targetCSVPath);
         if (dataLines.Length <= 1) return;
 
-        // Skip headers (i=0) and parse raw parameters into performance arrays
-        for (int i = 1; i < dataLines.Length; i++)
+        string[] firstRow = dataLines[1].Split(',');
+        if (firstRow.Length >= 5) int.TryParse(firstRow[4], out targetFrequency);
+
+        for (int i = 1; i < dataLines.Length; i++) 
         {
             string[] rowData = dataLines[i].Split(',');
-            if (rowData.Length >= 7)
+            if (rowData.Length >= 5) 
             {
-                float t = float.Parse(rowData[0]);
-                float r = float.Parse(rowData[1]);
-                int f0 = int.Parse(rowData[2]);
-                float p0 = float.Parse(rowData[3]);
-                float h1 = float.Parse(rowData[4]);
-                float h2 = float.Parse(rowData[5]);
-                float h3 = float.Parse(rowData[6]);
+                float fundRMS = float.Parse(rowData[2]);
+                float harmRMS = float.Parse(rowData[3]);
+                int parsedFreq = targetFrequency;
 
-                csvTimestamps.Add(t);
-                csvRadii.Add(r);
-                csvPrincipalFreqs.Add(f0);
-                csvP0Pressures.Add(p0);
-                csvH1Pressures.Add(h1);
-                csvH2Pressures.Add(h2);
-                csvH3Pressures.Add(h3);
+                if(rowData.Length >= 7) int.TryParse(rowData[6], out parsedFreq);
+                else int.TryParse(rowData[4], out parsedFreq);
 
-                // Track historical ceiling peaks for clean visual scaling factors
-                if (p0 > maxP0) maxP0 = p0;
-                if (h1 > maxH1) maxH1 = h1;
-                if (h2 > maxH2) maxH2 = h2;
-                if (h3 > maxH3) maxH3 = h3;
+                csvRadii.Add(float.Parse(rowData[1]));
+                csvFundamentalRMS.Add(fundRMS);
+                csvHarmonicRMS.Add(harmRMS);
+                csvFrequencies.Add(parsedFreq); 
+
+                if (fundRMS > maxFundRMS) maxFundRMS = fundRMS;
+                if (harmRMS > maxHarmRMS) maxHarmRMS = harmRMS;
             }
         }
 
         dataLoaded = true;
-
-        string wavName = Path.GetFileNameWithoutExtension(targetCSVPath) + ".wav";
+        string wavName = baseFileName + ".wav"; 
         string fullWavPath = Path.Combine(streamingPath, wavName);
+
         if (File.Exists(fullWavPath)) StartCoroutine(LoadAndPlayAudio(fullWavPath));
     }
 
-    System.Collections.IEnumerator LoadAndPlayAudio(string path)
+    System.Collections.IEnumerator LoadAndPlayAudio(string path) 
     {
-        using (UnityWebRequest multimediaRequest = UnityWebRequestMultimedia.GetAudioClip("file://" + path, AudioType.WAV))
+        using (UnityWebRequest multimediaRequest = UnityWebRequestMultimedia.GetAudioClip("file://" + path, AudioType.WAV)) 
         {
             yield return multimediaRequest.SendWebRequest();
-            if (multimediaRequest.result == UnityWebRequest.Result.Success)
-            {
+            if (multimediaRequest.result == UnityWebRequest.Result.Success) {
                 audioSource.clip = DownloadHandlerAudioClip.GetContent(multimediaRequest);
                 audioSource.loop = true;
                 audioSource.Play();
@@ -397,19 +540,14 @@ public class AdvancedWaveManager : MonoBehaviour
     {
         if (uiTextDisplay == null) return;
 
-        if (!dataLoaded)
-        {
-            uiTextDisplay.text = "<b>CAVE AKUSTIK TELEMETRY</b>\nStatus: Loading Pipeline Datasets...";
-            return;
-        }
+        string frequencyText = dataLoaded ? $"{targetFrequency} Hz" : "Loading...";
+        string fundText = dataLoaded ? liveFundamentalRMS.ToString("F5") : "0.00000";
+        string harmText = dataLoaded ? liveHarmonicRMS.ToString("F5") : "0.00000";
 
-        uiTextDisplay.text = $"<b>CAVE AKUSTIK TELEMETRY</b>\n" +
-                             $"Mode: <color=#FFFF00>{currentMode}</color>\n" +
-                             $"Principal Freq (f0): {liveFrequency} Hz\n" +
-                             $"P0 Pressure: {liveP0.ToString("F4")} Pa\n" +
-                             $"H1 Pressure (2f): {liveH1.ToString("F4")} Pa\n" +
-                             $"H2 Pressure (3f): {liveH2.ToString("F4")} Pa\n" +
-                             $"H3 Pressure (4f): {liveH3.ToString("F4")} Pa";
+        uiTextDisplay.text = $"<b>NIST CHAMBER TELEMETRY</b>\n" +
+                             $"Simulation Mode: {currentMode}\n" +
+                             $"Fundamental Frequency: {frequencyText}\n" +
+                             $"Live Fundamental Energy: {fundText} RMS\n" +
+                             $"Live Harmonic Energy: {harmText} RMS";
     }
 }
-
