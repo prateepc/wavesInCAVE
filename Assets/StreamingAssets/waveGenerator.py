@@ -5,10 +5,10 @@ import numpy as np
 import scipy.io.wavfile as wav
 import matplotlib.pyplot as plt
 
-def generate_calibrated_wave(filename, frequency, target_rms, duration=3.0, sample_rate=44100, include_harmonics=False, num_harmonics=3, decay_power=1.5):
+def generate_calibrated_wave(filename, frequency, target_rms, duration=3.0, sample_rate=44100, include_harmonics=False, num_harmonics=3, decay_power=1.5, step_multiplier=2):
     """
-    Generates a perfectly symmetric synthesized audio signal calibrated to an exact target RMS value.
-    Enforces absolute structural mirror symmetry across crests and troughs with a customizable energy decay rate.
+    Generates a phase-coherent synthesized audio signal calibrated to an exact target RMS value.
+    Enforces absolute mirror symmetry across crests and troughs using a cosine alignment configuration.
     """
     print(f"🎬 Synthesis Initialized: {frequency} Hz Target Core | Target Weight: {target_rms} RMS")
     print(f"📊 Harmonic Energy Decay Exponent: {decay_power}")
@@ -16,26 +16,28 @@ def generate_calibrated_wave(filename, frequency, target_rms, duration=3.0, samp
     # 1. Build time vector base
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     
-    # 2. Synthesize Composite Waveform with Mathematical Mirror Symmetry
+    # 2. Synthesize Composite Waveform (Symmetric Phase-Coherent Array)
     combined_signal = np.sin(2 * np.pi * frequency * t)
     
     active_harmonics_list = [frequency]
     if include_harmonics and num_harmonics > 0:
-        print(f"🧬 Blending {num_harmonics} symmetric odd overtone harmonics into fundamental core...")
+        print(f"🧬 Blending {num_harmonics} upper overtone harmonics into fundamental core...")
         
         for idx in range(1, num_harmonics + 1):
-            i = 1 + 2 * idx  # Generates 3, 5, 7, 9...
+            # Calculate the harmonic multiplier based on the step configuration
+            # If step_multiplier = 2 (Default), it generates ODD numbers: 3f, 5f, 7f (Perfect Symmetry)
+            # If step_multiplier = 1, it generates SEQUENTIAL numbers: 2f, 3f, 4f (Asymmetric tilting)
+            i = 1 + step_multiplier * idx  
             harmonic_freq = frequency * i
             
             if harmonic_freq > sample_rate / 2:
                 print(f"⚠️ Warning: Harmonic {i}f ({harmonic_freq}Hz) exceeds Nyquist limit. Skipping.")
                 break
                 
-            # Fourier alternating sign modifier creates a perfectly centered, balanced distortion
+            # Fourier alternating sign modifier combined with Cosine phase alignment 
+            # guarantees flawless mirrored symmetry across the zero-axis for odd series.
             sign_modifier = (-1) ** idx
-            
-            # CUSTOMIZABLE DECAY: Uses the command-line decay_power argument instead of a hardcoded 1.5
-            combined_signal += (sign_modifier / (i ** decay_power)) * np.sin(2 * np.pi * harmonic_freq * t)
+            combined_signal += (sign_modifier / (i ** decay_power)) * np.cos(2 * np.pi * harmonic_freq * t)
             active_harmonics_list.append(harmonic_freq)
             
     # 3. Precision RMS Calibration Block
@@ -116,20 +118,20 @@ def generate_calibrated_wave(filename, frequency, target_rms, duration=3.0, samp
         colors_map = ['crimson', 'forestgreen', 'darkorange', 'darkorchid', 'teal']
         for h_i, h_freq in enumerate(active_harmonics_list):
             if h_freq <= sample_rate / 2:
-                lbl = f"Layer {h_i+1} ({int(h_freq)}Hz)" if idx == 0 else ""
+                lbl = f"Layer {h_i+1}f ({int(h_freq)}Hz)" if idx == 0 else ""
                 ax.axvline(h_freq, color=colors_map[h_i % len(colors_map)], linestyle='--', alpha=0.8, label=lbl)
                 
-        ax.set_xlim(0, max(frequency * (2 * num_harmonics + 3), 1500))
+        ax.set_xlim(0, max(frequency * (step_multiplier * num_harmonics + 3), 1500))
         ax.set_ylabel("Amplitude")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper right")
         
     plt.xlabel("Frequency (Hz)")
-    plt.suptitle(f"6-Window Symmetric FFT Mapping Analysis\nBase Core: {frequency}Hz | Decay Power: {decay_power}", fontsize=12, fontweight='bold')
+    plt.suptitle(f"6-Window FFT Mapping Analysis\nBase Core: {frequency}Hz", fontsize=12, fontweight='bold')
     plt.tight_layout()
 
     # =====================================================================
-    # FEATURE 2: TIME-DOMAIN SYMMETRIC WAVEFORM PLOT
+    # FEATURE 2: TIME-DOMAIN WAVEFORM PLOT
     # =====================================================================
     print("📉 Plotting time-domain continuous wave layout...")
     plt.figure(figsize=(11, 4))
@@ -138,10 +140,10 @@ def generate_calibrated_wave(filename, frequency, target_rms, duration=3.0, samp
     zoom_duration = one_cycle_duration * 5.0
     zoom_samples_limit = int(sample_rate * zoom_duration)
     
-    plt.plot(t[:zoom_samples_limit], calibrated_signal[:zoom_samples_limit], color='royalblue', linewidth=2, label="Symmetric Complex Wave")
+    plt.plot(t[:zoom_samples_limit], calibrated_signal[:zoom_samples_limit], color='royalblue', linewidth=2, label="Complex Wave")
     plt.axhline(0, color='black', linestyle='-', alpha=0.3)
     
-    plt.title(f"Perfect Symmetric Waveform over Time (First 5 Cycles Shown)\nTarget Pitch: {frequency}Hz | Decay Power: {decay_power}", fontsize=11, fontweight='bold')
+    plt.title(f"Continuous Signal Waveform over Time (First 5 Cycles Shown)\nTarget Pitch: {frequency}Hz | Decay Power: {decay_power}", fontsize=11, fontweight='bold')
     plt.xlabel("Time (Seconds)")
     plt.ylabel("Signal Amplitude Pressures")
     plt.grid(True, alpha=0.3)
@@ -159,6 +161,7 @@ if __name__ == "__main__":
     parser.add_argument("--harmonics", action="store_true", help="Toggle inclusion of upper harmonic overtones")
     parser.add_argument("-n", "--count", type=int, default=3, help="Number of harmonic overtones to include if active")
     parser.add_argument("-p", "--power", type=float, default=1.5, help="Energy decay exponent power factor for overtones")
+    parser.add_argument("-s", "--step", type=int, default=2, choices=[1, 2], help="Harmonic step index strategy (1 = Sequential 2f,3f; 2 = Symmetric Odd 3f,5f)")
     
     args = parser.parse_args()
     
@@ -169,6 +172,7 @@ if __name__ == "__main__":
         duration=args.duration,
         include_harmonics=args.harmonics,
         num_harmonics=args.count,
-        decay_power=args.power
+        decay_power=args.power,
+        step_multiplier=args.step
     )
 
