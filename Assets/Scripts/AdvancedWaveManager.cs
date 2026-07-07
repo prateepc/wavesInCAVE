@@ -387,11 +387,11 @@ public class AdvancedWaveManager : MonoBehaviour
     {
         if (uiTextDisplay == null) return;
         string freqText = analysisComplete ? $"{principalFrequency:F1} Hz" : "Computing Fast Fourier Transform...";
-        
+        /*
         uiTextDisplay.text = $"<b>NIST CHAMBER SYSTEM (DIRECT AUDIO PIPELINE)</b>\n" +
                              $"Extracted Pitch Core: {freqText}\n" +
                              $"Total Displayed Slices: {activeWaves.Count}\n" +
-                             $"Status: Wavelength Geometry Locked.";
+                             $"Status: Wavelength Geometry Locked."; */
     }
 }
 
