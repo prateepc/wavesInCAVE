@@ -206,7 +206,7 @@ GameObject:
   - component: {fileID: 69517117}
   - component: {fileID: 69517116}
   m_Layer: 5
-  m_Name: ThreeQuarterFreqLabel
+  m_Name: ThreeQuarterIntensityLabel
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -228,7 +228,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 1090, y: 520}
+  m_AnchoredPosition: {x: 1070, y: 520}
   m_SizeDelta: {x: 200, y: 50}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &69517116
@@ -448,7 +448,7 @@ GameObject:
   - component: {fileID: 156825319}
   - component: {fileID: 156825318}
   m_Layer: 5
-  m_Name: QuarterFreqLabel
+  m_Name: QuarterIntensityLabel
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -470,7 +470,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 1110, y: 220}
+  m_AnchoredPosition: {x: 1070, y: 220}
   m_SizeDelta: {x: 200, y: 50}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &156825318
@@ -1577,18 +1577,17 @@ MonoBehaviour:
   currentMode: 0
   uiTextDisplay: {fileID: 430802690}
   legendColorBar: {fileID: 3136984}
-  minFreqLabel: {fileID: 1703327678}
-  quarterFreqLabel: {fileID: 156825318}
-  midFreqLabel: {fileID: 2020197852}
-  threeQuarterFreqLabel: {fileID: 69517116}
-  maxFreqLabel: {fileID: 1382576423}
+  MinIntensityLabel: {fileID: 1703327678}
+  QuarterIntensityLabel: {fileID: 156825318}
+  MidIntensityLabel: {fileID: 2020197852}
+  ThreeQuarterIntensityLabel: {fileID: 69517116}
+  MaxIntensityLabel: {fileID: 1382576423}
   tooltipPanel: {fileID: 1759306589}
   tooltipText: {fileID: 712449075}
   caveWandPointer: {fileID: 0}
   wavePrefab: {fileID: 3073009176411264582, guid: 6c5e3d34702ceb8c893e37986432e203, type: 3}
   maxGlowIntensity: 4
-  fundamentalAlpha: 0.5
-  harmonicAlpha: 0.4
+  waveOpacity: 0.6
 --- !u!82 &960764571
 AudioSource:
   m_ObjectHideFlags: 0
@@ -1907,7 +1906,7 @@ GameObject:
   - component: {fileID: 1382576424}
   - component: {fileID: 1382576423}
   m_Layer: 5
-  m_Name: MaxFreqLabel
+  m_Name: MaxIntensityLabel
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -2146,7 +2145,7 @@ GameObject:
   - component: {fileID: 1703327679}
   - component: {fileID: 1703327678}
   m_Layer: 5
-  m_Name: MinFreqLabel
+  m_Name: MinIntensityLabel
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -2168,7 +2167,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 1130, y: 70}
+  m_AnchoredPosition: {x: 1070, y: 70}
   m_SizeDelta: {x: 200, y: 50}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1703327678
@@ -2450,7 +2449,7 @@ GameObject:
   - component: {fileID: 2020197853}
   - component: {fileID: 2020197852}
   m_Layer: 5
-  m_Name: MidFreqLabel
+  m_Name: MidIntensityLabel
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -2472,7 +2471,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 1110, y: 370}
+  m_AnchoredPosition: {x: 1070, y: 370}
   m_SizeDelta: {x: 200, y: 50}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &2020197852
