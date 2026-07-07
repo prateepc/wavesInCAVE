@@ -1,0 +1,4 @@
+usage: waveGenerator.py [-h] [-o OUTPUT] -f FREQUENCY -r RMS [-d DURATION] [--harmonics] [-n COUNT]
+
+example (no harmonics): python3 ./waveGenerator.py -f 34.3 -r 0.25 -o pure_a34.3.wav
+example (with three harmonics): python3 ./waveGenerator.py -f 34.3 -r 0.25 --harmonics -n 3 -o pure_a34.3.wav

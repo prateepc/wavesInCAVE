@@ -1,29 +1,22 @@
 using System.IO;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.UI;
 using UnityEngine.Networking;
 using TMPro;
 
 [RequireComponent(typeof(AudioSource))]
-public class AdvancedWaveManager : MonoBehaviour 
+public class AdvancedWaveManager : MonoBehaviour
 {
-    public enum SimulationMode { Continuous, FreezeFrame }
-
-    [Header("Simulation Mode Settings")]
-    [Tooltip("Press SPACE during runtime to toggle between Continuous and Freeze Frame modes.")]
-    public SimulationMode currentMode = SimulationMode.Continuous;
+    [System.Serializable]
+    public struct BipolarSpectrumPair
+    {
+        public Color lowPressureTrough;
+        public Color zeroPressureEquilibrium;
+        public Color highPressureCrest;
+    }
 
     [Header("UI Display Links")]
     public TextMeshProUGUI uiTextDisplay;
-    
-    [Header("Dynamic Intensity Legend UI Overlay")]
-    public RawImage legendColorBar;
-    public TextMeshProUGUI MinIntensityLabel;          
-    public TextMeshProUGUI QuarterIntensityLabel;      
-    public TextMeshProUGUI MidIntensityLabel;          
-    public TextMeshProUGUI ThreeQuarterIntensityLabel;  
-    public TextMeshProUGUI MaxIntensityLabel;          
 
     [Header("Hover Tooltip UI Elements")]
     public GameObject tooltipPanel;
@@ -31,245 +24,313 @@ public class AdvancedWaveManager : MonoBehaviour
     public Transform caveWandPointer;
 
     [Header("Wave Prefab Link")]
-    [Tooltip("The base sphere prefab used for all visual wave shells.")]
+    [Tooltip("The base sphere/quad prefab used for flat spatial tracking slices.")]
     public GameObject wavePrefab;
 
     [Header("Visual Tuning Layout")]
     public float maxGlowIntensity = 5.0f;
     [Range(0f, 1f)] public float waveOpacity = 0.60f;
 
-    [Header("Simulation Timing")]
-    private float waveGenerationInterval = 0.05f; 
+    [Header("Acoustic Layer Color Matrices")]
+    [Tooltip("Divergent Color Maps (Low, Zero, High) for Fundamental, 2f, 3f, and 4f layers.")]
+    public BipolarSpectrumPair[] harmonicColorPalettes = new BipolarSpectrumPair[]
+    {
+        new BipolarSpectrumPair { lowPressureTrough = Color.blue, zeroPressureEquilibrium = Color.white, highPressureCrest = Color.red },      // 1f Base fundamental mapping
+        new BipolarSpectrumPair { lowPressureTrough = new Color(0f,0.2f,0f), zeroPressureEquilibrium = Color.white, highPressureCrest = Color.green }, // 2f
+        new BipolarSpectrumPair { lowPressureTrough = new Color(0f,0.1f,0.3f), zeroPressureEquilibrium = Color.white, highPressureCrest = Color.cyan }, // 3f
+        new BipolarSpectrumPair { lowPressureTrough = new Color(0.2f,0f,0.2f), zeroPressureEquilibrium = Color.white, highPressureCrest = Color.magenta } // 4f
+    };
 
-    [Header("Acoustic Physics Settings")]
-    private float simulationSpeedMultiplier = 1.0f; 
-    private int targetFrequency = 440;
-    
     private AudioSource audioSource;
     private List<GameObject> activeWaves = new List<GameObject>();
     
-    private List<float> csvRadii = new List<float>();
-    private List<float> csvFundamentalRMS = new List<float>();
-    private List<int> csvFrequencies = new List<int>(); 
-    
-    private float waveTimer = 0f;
-    private bool dataLoaded = false;
-    private float maxDistanceToFurthestCorner = 0f;
-    
-    private float maxFundRMS = 0.0001f; 
-    private float liveFundamentalRMS = 0f;
-    private int currentCSVIndex = 0;
+    // Core extracted analytical variables
+    private float principalFrequency = 343f;
+    private float calculatedRMS = 0f;
+    private float peakPressure = 0f;
+    private float[] harmonicAmplitudes = new float[] { 0f, 0f, 0f, 0f };
+    private bool analysisComplete = false;
 
-    private Vector3 chamberMin = new Vector3(-3.35f, 0.00f, -5.00f); 
-    private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);  
+    private Vector3 chamberMin = new Vector3(-3.35f, 0.00f, -5.00f);
+    private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);
+    private const float SPEED_OF_SOUND = 343.0f;
 
     void Start()
     {
         audioSource = GetComponent<AudioSource>();
-        maxDistanceToFurthestCorner = CalculateMaxCornerDistance();
-
         if (uiTextDisplay == null)
         {
             GameObject foundUIObject = GameObject.Find("TelemetryDisplay");
             if (foundUIObject != null) uiTextDisplay = foundUIObject.GetComponent<TextMeshProUGUI>();
         }
-
         if (tooltipPanel != null) tooltipPanel.SetActive(false);
 
-        AutomatePipelineDiscovery();
-        StartCoroutine(InitializeLegendUI());
+        DiscoverAndAnalyzeLatestWav();
     }
 
     void Update()
     {
-        if (Input.GetKeyDown(KeyCode.Space)) ToggleSimulationMode();
-
-        UpdateUIScreen(); 
-
-        if (!dataLoaded) return; 
-
-        if (currentMode == SimulationMode.Continuous)
-        {
-            waveTimer += Time.deltaTime;
-            if (waveTimer >= waveGenerationInterval) 
-            {
-                EmitSequentialPhysicalWave();
-                waveTimer = 0f;
-            }
-            ProcessWavePhysics();
-        }
-
+        UpdateUIScreen();
         HandleWaveInterrogation();
     }
 
-    public void ToggleSimulationMode()
+    void DiscoverAndAnalyzeLatestWav()
     {
-        ClearActiveWaves();
-        if (currentMode == SimulationMode.Continuous)
-        {
-            currentMode = SimulationMode.FreezeFrame;
-            EmitFreezeFrameWaves();
-        }
-        else
-        {
-            currentMode = SimulationMode.Continuous;
-            waveTimer = 0f; 
-            currentCSVIndex = 0;
-        }
+        string streamingPath = Application.streamingAssetsPath;
+        if (!Directory.Exists(streamingPath)) return;
+
+        string[] discoveredFiles = Directory.GetFiles(streamingPath, "*.wav");
+        if (discoveredFiles.Length == 0) return;
+
+        // Automatically sort by latest modification timestamp
+        System.Array.Sort(discoveredFiles, (a, b) => File.GetLastWriteTime(b).CompareTo(File.GetLastWriteTime(a)));
+        string targetWavPath = discoveredFiles[0];
+
+        StartCoroutine(LoadAndAnalyzeAudioPipeline(targetWavPath));
     }
-
-    private void ClearActiveWaves()
+    System.Collections.IEnumerator LoadAndAnalyzeAudioPipeline(string path)
     {
-        foreach (GameObject wave in activeWaves)
-        {
-            if (wave != null) Destroy(wave);
-        }
-        activeWaves.Clear();
-    }
+        string formattedUrl = new System.Uri(path).AbsoluteUri;
 
-    System.Collections.IEnumerator InitializeLegendUI()
-    {
-        while (!dataLoaded)
+        using (UnityWebRequest multimediaRequest = UnityWebRequestMultimedia.GetAudioClip(formattedUrl, AudioType.WAV))
         {
-            yield return null;
-        }
-        
-        yield return new WaitForEndOfFrame();
+            yield return multimediaRequest.SendWebRequest();
+            if (multimediaRequest.result != UnityWebRequest.Result.Success) yield break;
 
-        if (legendColorBar != null)
-        {
-            Texture2D texture = new Texture2D(1, 512);
-            texture.wrapMode = TextureWrapMode.Clamp;
+            AudioClip clip = DownloadHandlerAudioClip.GetContent(multimediaRequest);
+            audioSource.clip = clip;
+            audioSource.loop = true;
+            audioSource.Play();
 
-            for (int y = 0; y < 512; y++)
+            // Extract native floating-point sample arrays from the clip asset channels
+            float[] totalSamples = new float[clip.samples * clip.channels];
+            clip.GetData(totalSamples, 0);
+
+            // 1. ESTIMATE RMS AND PEAK PRESSURES
+            float sumOfSquares = 0f;
+            float maxPeak = 0f;
+            int analysisLength = Mathf.Min(totalSamples.Length, 131072); // Read a wide data window for clean sample coverage
+
+            for (int i = 0; i < analysisLength; i++)
             {
-                float progress = (float)y / 511f;
-                Color pixelColor = Color.Lerp(new Color(0.1f, 0.0f, 0.3f), Color.red, progress);
-                if (progress > 0.75f) pixelColor = Color.Lerp(Color.red, Color.yellow, (progress - 0.75f) * 4f);
-                texture.SetPixel(0, y, pixelColor);
+                float sampleValue = totalSamples[i];
+                sumOfSquares += sampleValue * sampleValue;
+                if (Mathf.Abs(sampleValue) > maxPeak) maxPeak = Mathf.Abs(sampleValue);
             }
-            texture.Apply();
-            legendColorBar.texture = texture;
-        }
+            calculatedRMS = Mathf.Sqrt(sumOfSquares / analysisLength);
+            peakPressure = maxPeak;
 
-        if (MinIntensityLabel != null) MinIntensityLabel.text = "0.00000 RMS";
-        if (QuarterIntensityLabel != null) QuarterIntensityLabel.text = $"{(maxFundRMS * 0.25f):F5} RMS";
-        if (MidIntensityLabel != null) MidIntensityLabel.text = $"{(maxFundRMS * 0.50f):F5} RMS";
-        if (ThreeQuarterIntensityLabel != null) ThreeQuarterIntensityLabel.text = $"{(maxFundRMS * 0.75f):F5} RMS";
-        if (MaxIntensityLabel != null) MaxIntensityLabel.text = $"{maxFundRMS:F5} RMS";
-    }
+            // 2. NATIVE FAST FOURIER TRANSFORM (FFT) MATRIX SETUP
+            int fftSize = 16384; 
+            float sampleRate = clip.frequency;
 
-    void EmitSequentialPhysicalWave() 
-    {
-        if (wavePrefab == null || csvFundamentalRMS.Count == 0) return;
-        if (currentCSVIndex >= csvFundamentalRMS.Count) currentCSVIndex = 0; 
-
-        float targetRMS = csvFundamentalRMS[currentCSVIndex];
-        int targetFreq = csvFrequencies[currentCSVIndex];
-
-        GameObject waveShell = Instantiate(wavePrefab, transform.position, Quaternion.identity);
-        waveShell.name = $"Acoustic_Shell_Idx_{currentCSVIndex}";
-        waveShell.transform.localScale = new Vector3(0.05f, 0.05f, 0.05f);
-        ConfigureShaderBoundaries(waveShell);
-
-        WaveDataIdentifier identifier = waveShell.AddComponent<WaveDataIdentifier>();
-        identifier.waveFrequency = targetFreq;
-        identifier.harmonicOrder = $"Physical Wave Profile";
-
-        liveFundamentalRMS = targetRMS;
-
-        activeWaves.Add(waveShell);
-        currentCSVIndex++;
-    }
-
-    void ProcessWavePhysics() 
-    {
-        List<GameObject> deadWaves = new List<GameObject>();
-        float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
-
-        for (int i = 0; i < activeWaves.Count; i++) 
-        {
-            GameObject wave = activeWaves[i];
-            if (wave == null) continue;
-
-            float currentRadius = wave.transform.localScale.x / 2f;
-            currentRadius += 343f * Time.deltaTime * simulationSpeedMultiplier;
-            wave.transform.localScale = new Vector3(currentRadius * 2f, currentRadius * 2f, currentRadius * 2f);
-
-            float distanceProgress = Mathf.Clamp01(currentRadius / roomFadeMaxDistance);
-            float distanceDecay = Mathf.Clamp01(1.0f - distanceProgress);
-
-            int dataIndex = Mathf.Clamp(Mathf.FloorToInt(distanceProgress * (csvFundamentalRMS.Count - 1)), 0, csvFundamentalRMS.Count - 1);
-            float localRMS = csvFundamentalRMS[dataIndex];
-            float normalizedIntensity = Mathf.Clamp01(localRMS / maxFundRMS);
-
-            Renderer waveRenderer = wave.GetComponent<Renderer>();
-            if (waveRenderer != null)
+            double[] realBuffer = new double[fftSize];
+            double[] imagBuffer = new double[fftSize];
+            for (int i = 0; i < fftSize; i++)
             {
-                waveRenderer.material.EnableKeyword("_EMISSION");
-                Color physicalColor = Color.Lerp(new Color(0.1f, 0.0f, 0.3f), Color.red, normalizedIntensity);
-                if (normalizedIntensity > 0.75f) physicalColor = Color.Lerp(Color.red, Color.yellow, (normalizedIntensity - 0.75f) * 4f);
+                // Apply a Hanning window function to reduce side-lobe grid leakage artifacts
+                float hanningWindow = 0.5f * (1f - Mathf.Cos(2f * Mathf.PI * i / (fftSize - 1)));
+                realBuffer[i] = totalSamples[i] * hanningWindow;
+                imagBuffer[i] = 0.0;
+            }
+
+            // Execute Cooley-Tukey Radix-2 FFT calculation pass
+            ExecuteInPlaceCooleyTukeyFFT(realBuffer, imagBuffer, fftSize);
+
+            // 3. IDENTIFY PRINCIPAL PEAK BIN LOCATION
+            float binWidth = sampleRate / fftSize;
+            float highestMagnitude = 0f;
+            int peakBinIndex = 0;
+
+            int minBin = Mathf.CeilToInt(30f / binWidth);
+            int maxBin = Mathf.FloorToInt(4000f / binWidth);
+
+            for (int k = minBin; k < maxBin; k++)
+            {
+                float magnitude = Mathf.Sqrt((float)(realBuffer[k] * realBuffer[k] + imagBuffer[k] * imagBuffer[k]));
+                if (magnitude > highestMagnitude)
+                {
+                    highestMagnitude = magnitude;
+                    peakBinIndex = k;
+                }
+            }
+
+            principalFrequency = peakBinIndex * binWidth;
+            harmonicAmplitudes[0] = highestMagnitude; // 1f Magnitude base
+
+            // 4. ANALYZE AND EXTRACT THREE UPPER HARMONIC OVERTONES (2f, 3f, 4f)
+            for (int h = 2; h <= 4; h++)
+            {
+                float targetHarmonicFreq = principalFrequency * h;
+                int targetBin = Mathf.RoundToInt(targetHarmonicFreq / binWidth);
                 
-                physicalColor.a = waveOpacity * distanceDecay; 
-                waveRenderer.material.color = physicalColor;
-                waveRenderer.material.SetColor("_EmissionColor", physicalColor * normalizedIntensity * maxGlowIntensity * distanceDecay);
+                float bestHarmonicMag = 0f;
+                for (int offset = -2; offset <= 2; offset++)
+                {
+                    int currentCheckBin = targetBin + offset;
+                    if (currentCheckBin < fftSize / 2)
+                    {
+                        float magnitude = Mathf.Sqrt((float)(realBuffer[currentCheckBin] * realBuffer[currentCheckBin] + imagBuffer[currentCheckBin] * imagBuffer[currentCheckBin]));
+                        if (magnitude > bestHarmonicMag) bestHarmonicMag = magnitude;
+                    }
+                }
+                harmonicAmplitudes[h - 1] = (bestHarmonicMag > highestMagnitude * 0.05f) ? bestHarmonicMag : 0f;
             }
 
-            if (currentRadius >= maxDistanceToFurthestCorner) deadWaves.Add(wave);
-        }
+            analysisComplete = true;
 
-        foreach (GameObject expiredWave in deadWaves) 
-        {
-            activeWaves.Remove(expiredWave);
-            Destroy(expiredWave);
+            // Trigger instant dynamic layout generation matching true wavelength physics
+            GenerateStaticFourierSlices();
         }
     }
 
-    void EmitFreezeFrameWaves()
+    void ExecuteInPlaceCooleyTukeyFFT(double[] real, double[] imag, int n)
     {
-        if (wavePrefab == null || csvFundamentalRMS.Count == 0) return;
+        int j = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (i < j)
+            {
+                double tempReal = real[i]; double tempImag = imag[i];
+                real[i] = real[j]; imag[i] = imag[j];
+                real[j] = tempReal; imag[j] = tempImag;
+            }
+            int m = n >> 1;
+            while (m >= 1 && j >= m) { j -= m; m >>= 1; }
+            j += m;
+        }
+        for (int len = 2; len <= n; len <<= 1)
+        {
+            double angle = -2.0 * System.Math.PI / len;
+            double wlenReal = System.Math.Cos(angle); double wlenImag = System.Math.Sin(angle);
+            for (int i = 0; i < n; i += len)
+            {
+                double wReal = 1.0; double wImag = 0.0;
+                for (int k = 0; k < len / 2; k++)
+                {
+                    int u = i + k; int v = i + k + len / 2;
+                    double tReal = real[v] * wReal - imag[v] * wImag;
+                    double tImag = real[v] * wImag + imag[v] * wReal;
+                    real[v] = real[u] - tReal; imag[v] = imag[u] - tImag;
+                    real[u] += tReal; imag[u] += tImag;
+                    double nextWReal = wReal * wlenReal - wImag * wlenImag;
+                    wImag = wReal * wlenImag + wImag * wlenReal;
+                    wReal = nextWReal;
+                }
+            }
+        }
+    }
+    void GenerateStaticFourierSlices()
+    {
+        foreach (GameObject wave in activeWaves) { if (wave != null) Destroy(wave); }
+        activeWaves.Clear();
 
-        float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
-        float totalTimeForMaxDepth = roomFadeMaxDistance / 343f;
+        if (wavePrefab == null) return;
+
+        float roomFadeMaxDistance = chamberMax.z - chamberMin.z; // 10.0 meters total long
+        float baseWavelength = SPEED_OF_SOUND / principalFrequency; // 343 / 343 = 1.0 meter physical wave cycles
         
-        int totalSlices = 40;
-        float timeStep = totalTimeForMaxDepth / totalSlices;
+        float totalWavelengthsInChamber = roomFadeMaxDistance / baseWavelength; // Fits exactly 10 waves
+        int slicesPerWavelength = 6; // Spawns 6 flat timeline indicators per meter to completely capture phase
+        
+        int totalSlices = Mathf.CeilToInt(totalWavelengthsInChamber * slicesPerWavelength); // Exactly 60 flat slices
+        if (totalSlices < 2) totalSlices = 2;
+
+        float spatialStepDistance = roomFadeMaxDistance / totalSlices;
+        MaterialPropertyBlock propBlock = new MaterialPropertyBlock();
+
+        // Establish an ultra-small offset to prevent a divide-by-zero crash at r = 0
+        float sourceOriginSafetyOffset = 0.05f; 
 
         for (int i = 1; i <= totalSlices; i++)
         {
-            float targetTime = i * timeStep;
-            float frozenRadius = 343f * targetTime; 
+            // r represents the actual physical radius from the sound source center in meters
+            float r = (i * spatialStepDistance) + sourceOriginSafetyOffset;
 
-            GameObject frozenWave = Instantiate(wavePrefab, transform.position, Quaternion.identity);
-            frozenWave.name = $"Frozen_Pressure_Shell_{i}";
-            frozenWave.transform.localScale = new Vector3(frozenRadius * 2f, frozenRadius * 2f, frozenRadius * 2f);
+            // FIXED POINT-SOURCE CALIBRATION: All shells are centered on the speaker's true transform location
+            Vector3 spawnPosition = transform.position;
+
+            float complexAcousticWave = 0f;
+            float totalWeights = 0f;
+            float fundamentalPhaseSign = 0f;
+
+            // 1. SPHERICAL PROPAGATION PROP ENGINE: P(r) = (P_peak / r) * sin(k * r)
+            for (int h = 1; h <= 4; h++)
+            {
+                float amplitudeWeight = harmonicAmplitudes[h - 1];
+                if (amplitudeWeight > 0f)
+                {
+                    float currentFrequency = principalFrequency * h;
+                    
+                    // Calculate Wave Number (k = 2 * PI / lambda) for this specific harmonic tier
+                    float k = (2f * Mathf.PI * currentFrequency) / SPEED_OF_SOUND;
+
+                    // SPHERICAL ACOUSTIC PROPAGATION FORMULA: P(r) = (P_peak / r) * sin(k * r)
+                    float layerPressure = (amplitudeWeight / r) * Mathf.Sin(k * r);
+
+                    complexAcousticWave += layerPressure;
+                    totalWeights += (amplitudeWeight / r); // Attenuate maximum relative scaling weights by 1/r as well
+
+                    if (h == 1) fundamentalPhaseSign = layerPressure;
+                }
+            }
+
+            // Normalize the combined complex wave pressure to a safe [-1.0, +1.0] visual range
+            float normalizedPressure = (totalWeights > 0f) ? (complexAcousticWave / totalWeights) : 0f;
+            normalizedPressure = Mathf.Clamp(normalizedPressure, -1f, 1f);
+
+            // 2. MIX BIPOLAR SPECTRAL PALETTES BASED ON WEIGHTS
+            Color combinedAcousticColor = Color.white;
+            if (totalWeights > 0f)
+            {
+                BipolarSpectrumPair palette = harmonicColorPalettes[0]; // Map directly to fundamental palette layout template
+                if (normalizedPressure >= 0f)
+                {
+                    // Positive compression crest: Blend smoothly from White (0.0) up to Red (+1.0)
+                    combinedAcousticColor = Color.Lerp(palette.zeroPressureEquilibrium, palette.highPressureCrest, normalizedPressure);
+                }
+                else
+                {
+                    // Negative rarefaction trough: Blend smoothly from White (0.0) down to Blue (-1.0)
+                    combinedAcousticColor = Color.Lerp(palette.zeroPressureEquilibrium, palette.lowPressureTrough, Mathf.Abs(normalizedPressure));
+                }
+            }
+
+            // Factor in standard fading depth rules and master opacity choices
+            float distanceDecay = Mathf.Clamp01(1.0f - (r / roomFadeMaxDistance));
+            combinedAcousticColor.a = waveOpacity * distanceDecay;
+
+            // 3. INSTANTIATE AND EXPAND CONCENTRIC 4*PI SPHERICAL SHELL
+            GameObject frozenWave = Instantiate(wavePrefab, spawnPosition, Quaternion.identity);
+            frozenWave.name = $"Static_Spherical_Shell_{i}_Radius_{r:F2}m_P_{normalizedPressure:F2}";
+            
+            // MAP RADIUS DIRECTLY TO SCALE: Multiplied by 2.0f because localScale governs diameter sizing
+            frozenWave.transform.localScale = new Vector3(r * 2f, r * 2f, r * 2f);
             ConfigureShaderBoundaries(frozenWave);
 
             Collider c = frozenWave.GetComponent<Collider>();
-            if (c != null) c.enabled = false;
+            if (c != null) c.isTrigger = true;
 
-            float distanceProgress = Mathf.Clamp01(frozenRadius / roomFadeMaxDistance);
-            float distanceDecay = Mathf.Clamp01(1.0f - distanceProgress);
-            
-            int dataIndex = Mathf.Clamp(Mathf.FloorToInt(distanceProgress * (csvFundamentalRMS.Count - 1)), 0, csvFundamentalRMS.Count - 1);
-            float localRMS = csvFundamentalRMS[dataIndex];
-            float normalizedIntensity = Mathf.Clamp01(localRMS / maxFundRMS);
-            int calculatedFreezeFrequency = csvFrequencies[dataIndex];
-
+            // 4. MAP DETAILS FOR THE INTERACTION WAND
             WaveDataIdentifier identifier = frozenWave.AddComponent<WaveDataIdentifier>();
-            identifier.waveFrequency = calculatedFreezeFrequency;
-            identifier.harmonicOrder = $"Pressure Slice [Energy: {localRMS:F5} RMS]";
+            identifier.waveFrequency = Mathf.RoundToInt(principalFrequency);
+            identifier.harmonicOrder = fundamentalPhaseSign > 0.02f ? "Fourier Compression Zone (High Pressure Crest)" :
+                                       fundamentalPhaseSign < -0.02f ? "Fourier Rarefaction Zone (Low Pressure Trough)" : "Acoustic Equilibrium Node (Zero Pressure)";
 
+            // 5. INJECT MATRIX PARAMETERS VIA PROPERTY BLOCK TO COMPLETELY PREVENT MATERIAL LEAKS
             Renderer waveRenderer = frozenWave.GetComponent<Renderer>();
             if (waveRenderer != null)
             {
-                waveRenderer.material.EnableKeyword("_EMISSION");
-                Color physicalColor = Color.Lerp(new Color(0.1f, 0.0f, 0.3f), Color.red, normalizedIntensity);
-                if (normalizedIntensity > 0.75f) physicalColor = Color.Lerp(Color.red, Color.yellow, (normalizedIntensity - 0.75f) * 4f);
+                waveRenderer.sharedMaterial.EnableKeyword("_EMISSION");
+                waveRenderer.GetPropertyBlock(propBlock);
                 
-                physicalColor.a = waveOpacity * distanceDecay;
-                waveRenderer.material.color = physicalColor;
-                waveRenderer.material.SetColor("_EmissionColor", physicalColor * normalizedIntensity * maxGlowIntensity * distanceDecay);
+                propBlock.SetColor("_Color", combinedAcousticColor);
+                propBlock.SetColor("_BaseColor", combinedAcousticColor);
+                
+                Color emissionGlow = combinedAcousticColor * maxGlowIntensity * distanceDecay;
+                propBlock.SetColor("_EmissionColor", emissionGlow);
+                
+                waveRenderer.SetPropertyBlock(propBlock);
             }
 
             activeWaves.Add(frozenWave);
@@ -278,71 +339,34 @@ public class AdvancedWaveManager : MonoBehaviour
 
     void HandleWaveInterrogation()
     {
-        if (tooltipPanel == null || tooltipText == null) return;
+        if (tooltipPanel == null || tooltipText == null || !analysisComplete) return;
 
-        // --- FIXED STATIONARY FREEZE FRAME HUD OVERLAY ---
-        if (currentMode == SimulationMode.FreezeFrame)
-        {
-            tooltipPanel.SetActive(true);
-            
-            RectTransform panelRect = tooltipPanel.GetComponent<RectTransform>();
-            if (panelRect != null)
-            {
-                panelRect.anchorMin = new Vector2(1f, 0f);
-                panelRect.anchorMax = new Vector2(1f, 0f);
-                panelRect.pivot = new Vector2(1f, 0f);
-                panelRect.anchoredPosition = new Vector2(-40f, 40f);
-            }
-            
-            tooltipText.text = $"<b>FREEZE FRAME SUMMARY</b>\n" +
-                               $"Analyzed Slices: {activeWaves.Count}\n" +
-                               $"Peak Capture: {maxFundRMS:F5} RMS\n" +
-                               $"Target Pitch: {targetFrequency} Hz";
-            return;
-        }
-
-        // --- CONTINUOUS MODE RAYCAST DETECTOR ---
-        Ray ray = (caveWandPointer != null) 
-            ? new Ray(caveWandPointer.position, caveWandPointer.forward) 
-            : Camera.main.ScreenPointToRay(Input.mousePosition);
-
+        Ray ray = (caveWandPointer != null) ? new Ray(caveWandPointer.position, caveWandPointer.forward) : Camera.main.ScreenPointToRay(Input.mousePosition);
         RaycastHit hit;
-        
+
         if (Physics.Raycast(ray, out hit, 100f, Physics.AllLayers, QueryTriggerInteraction.Collide))
         {
             WaveDataIdentifier targetedWave = hit.collider.GetComponent<WaveDataIdentifier>();
-
-            if (targetedWave != null && targetedWave.waveFrequency > 0)
+            if (targetedWave != null)
             {
                 tooltipPanel.SetActive(true);
-                
                 RectTransform panelRect = tooltipPanel.GetComponent<RectTransform>();
                 if (panelRect != null)
                 {
-                    panelRect.anchorMin = new Vector2(0f, 0f);
-                    panelRect.anchorMax = new Vector2(0f, 0f);
-                    panelRect.pivot = new Vector2(0f, 0f);
+                    panelRect.anchorMin = Vector2.zero; panelRect.anchorMax = Vector2.zero; panelRect.pivot = Vector2.zero;
                 }
 
-                tooltipPanel.transform.position = (caveWandPointer != null) 
-                    ? Camera.main.WorldToScreenPoint(hit.point) 
-                    : Input.mousePosition + new Vector3(20f, 20f, 0f);
-
-                float internalHitRadius = Vector3.Distance(transform.position, hit.point);
-                float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
-                float progress = Mathf.Clamp01(internalHitRadius / roomFadeMaxDistance);
-                int dataIndex = Mathf.Clamp(Mathf.FloorToInt(progress * (csvFundamentalRMS.Count - 1)), 0, csvFundamentalRMS.Count - 1);
-                
-                float intersectionRMS = csvFundamentalRMS[dataIndex];
+                tooltipPanel.transform.position = (caveWandPointer != null) ? Camera.main.WorldToScreenPoint(hit.point) : Input.mousePosition + new Vector3(20f, 20f, 0f);
+                float hitRadius = Vector3.Distance(transform.position, hit.point);
 
                 tooltipText.text = $"<b>{targetedWave.harmonicOrder}</b>\n" +
-                                   $"Freq: {targetedWave.waveFrequency} Hz\n" +
-                                   $"Energy: {intersectionRMS:F5} RMS\n" +
-                                   $"Distance: {internalHitRadius:F2} m";
-                return; 
+                                   $"Analyzed Principal: {targetedWave.waveFrequency} Hz\n" +
+                                   $"Global RMS Weight: {calculatedRMS:F5}\n" +
+                                   $"Global Peak Pressure: {peakPressure:F5}\n" +
+                                   $"Distance From Source: {hitRadius:F2} m";
+                return;
             }
         }
-
         tooltipPanel.SetActive(false);
     }
 
@@ -351,100 +375,23 @@ public class AdvancedWaveManager : MonoBehaviour
         Renderer r = waveTarget.GetComponent<Renderer>();
         if (r != null)
         {
-            r.material.SetVector("_ChamberMin", new Vector4(chamberMin.x, chamberMin.y, chamberMin.z, 0f));
-            r.material.SetVector("_ChamberMax", new Vector4(chamberMax.x, chamberMax.y, chamberMax.z, 0f));
-        }
-    }
-
-    private float CalculateMaxCornerDistance()
-    {
-        Vector3[] corners = new Vector3[]
-        {
-            new Vector3(chamberMin.x, chamberMin.y, chamberMin.z),
-            new Vector3(chamberMax.x, chamberMin.y, chamberMin.z),
-            new Vector3(chamberMin.x, chamberMax.y, chamberMin.z),
-            new Vector3(chamberMax.x, chamberMax.y, chamberMin.z),
-            new Vector3(chamberMin.x, chamberMin.y, chamberMax.z),
-            new Vector3(chamberMax.x, chamberMin.y, chamberMax.z),
-            new Vector3(chamberMin.x, chamberMax.y, chamberMax.z),
-            new Vector3(chamberMax.x, chamberMax.y, chamberMax.z)
-        };
-
-        float maxDist = 0f;
-        foreach (Vector3 corner in corners)
-        {
-            float dist = Vector3.Distance(transform.position, corner);
-            if (dist > maxDist) maxDist = dist;
-        }
-        return maxDist;
-    }
-
-    void AutomatePipelineDiscovery() 
-    {
-        string streamingPath = Application.streamingAssetsPath;
-        if (!Directory.Exists(streamingPath)) return;
-        
-        string[] discoveredFiles = Directory.GetFiles(streamingPath, "*.csv");
-        if (discoveredFiles.Length == 0) return;
-
-        System.Array.Sort(discoveredFiles, (a, b) => File.GetLastWriteTime(b).CompareTo(File.GetLastWriteTime(a)));
-        string targetCSVPath = discoveredFiles[0];
-        string baseFileName = Path.GetFileNameWithoutExtension(targetCSVPath);
-
-        string[] dataLines = File.ReadAllLines(targetCSVPath);
-        if (dataLines.Length <= 1) return;
-
-        string[] firstRow = dataLines[1].Split(',');
-        if (firstRow.Length >= 5) int.TryParse(firstRow[4], out targetFrequency);
-
-        for (int i = 1; i < dataLines.Length; i++) 
-        {
-            string[] rowData = dataLines[i].Split(',');
-            if (rowData.Length >= 3) 
-            {
-                float fundRMS = float.Parse(rowData[2]);
-                int parsedFreq = targetFrequency;
-
-                if (rowData.Length >= 7) int.TryParse(rowData[6], out parsedFreq);
-
-                csvRadii.Add(float.Parse(rowData[1]));
-                csvFundamentalRMS.Add(fundRMS);
-                csvFrequencies.Add(parsedFreq); 
-
-                if (fundRMS > maxFundRMS) maxFundRMS = fundRMS;
-            }
-        }
-
-        dataLoaded = true;
-        string wavName = baseFileName + ".wav"; 
-        string fullWavPath = Path.Combine(streamingPath, wavName);
-
-        if (File.Exists(fullWavPath)) StartCoroutine(LoadAndPlayAudio(fullWavPath));
-    }
-
-    System.Collections.IEnumerator LoadAndPlayAudio(string path) 
-    {
-        using (UnityWebRequest multimediaRequest = UnityWebRequestMultimedia.GetAudioClip("file://" + path, AudioType.WAV)) 
-        {
-            yield return multimediaRequest.SendWebRequest();
-            if (multimediaRequest.result == UnityWebRequest.Result.Success) {
-                audioSource.clip = DownloadHandlerAudioClip.GetContent(multimediaRequest);
-                audioSource.loop = true;
-                audioSource.Play();
-            }
+            MaterialPropertyBlock propBlock = new MaterialPropertyBlock();
+            r.GetPropertyBlock(propBlock);
+            propBlock.SetVector("_ChamberMin", new Vector4(chamberMin.x, chamberMin.y, chamberMin.z, 0f));
+            propBlock.SetVector("_ChamberMax", new Vector4(chamberMax.x, chamberMax.y, chamberMax.z, 0f));
+            r.SetPropertyBlock(propBlock);
         }
     }
 
     void UpdateUIScreen()
     {
         if (uiTextDisplay == null) return;
-
-        string frequencyText = dataLoaded ? $"{targetFrequency} Hz" : "Loading...";
-        string fundText = dataLoaded ? liveFundamentalRMS.ToString("F5") : "0.00000";
-
-        uiTextDisplay.text = $"<b>NIST CHAMBER TELEMETRY (RMS MODEL)</b>\n" +
-                             $"Simulation Mode: {currentMode}\n" +
-                             $"Tracked Core Pitch: {frequencyText}\n" +
-                             $"Instantaneous Wave Energy: {fundText} RMS";
+        string freqText = analysisComplete ? $"{principalFrequency:F1} Hz" : "Computing Fast Fourier Transform...";
+        
+        uiTextDisplay.text = $"<b>NIST CHAMBER SYSTEM (DIRECT AUDIO PIPELINE)</b>\n" +
+                             $"Extracted Pitch Core: {freqText}\n" +
+                             $"Total Displayed Slices: {activeWaves.Count}\n" +
+                             $"Status: Wavelength Geometry Locked.";
     }
 }
+
