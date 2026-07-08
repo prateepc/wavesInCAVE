@@ -3539,13 +3539,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 702dd49e574f93ae2948a027d01e8df1, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  sliderFrequency: {fileID: 0}
-  sliderRMS: {fileID: 0}
-  sliderDuration: {fileID: 0}
-  sliderCount: {fileID: 0}
-  sliderPower: {fileID: 0}
-  sliderStep: {fileID: 0}
-  generateButton: {fileID: 0}
+  sliderFrequency: {fileID: 779879002}
+  sliderRMS: {fileID: 825919499}
+  sliderDuration: {fileID: 346942009}
+  sliderCount: {fileID: 1965934290}
+  sliderPower: {fileID: 227638889}
+  sliderStep: {fileID: 2039425654}
+  generateButton: {fileID: 2122522064}
   uiTextDisplay: {fileID: 430802690}
   tooltipPanel: {fileID: 1759306589}
   tooltipText: {fileID: 712449075}
@@ -7106,7 +7106,19 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 2122522065}
   m_OnClick:
     m_PersistentCalls:
-      m_Calls: []
+      m_Calls:
+      - m_Target: {fileID: 960764570}
+        m_TargetAssemblyTypeName: AdvancedWaveManager, Assembly-CSharp
+        m_MethodName: ReadSlidersAndRebuildSimulation
+        m_Mode: 1
+        m_Arguments:
+          m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument: 
+          m_BoolArgument: 0
+        m_CallState: 2
 --- !u!114 &2122522065
 MonoBehaviour:
   m_ObjectHideFlags: 0

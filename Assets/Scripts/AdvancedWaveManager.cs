@@ -2,7 +2,7 @@ using System.IO;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
-using UnityEngine.UI; // Required for Slider and Button references
+using UnityEngine.UI; 
 using TMPro;
 
 [RequireComponent(typeof(AudioSource))]
@@ -27,6 +27,14 @@ public class AdvancedWaveManager : MonoBehaviour
 
     [Header("UI Display Links")]
     public TextMeshProUGUI uiTextDisplay;
+
+    [Header("Dynamic 5-Point Color Legend")]
+    public UnityEngine.UI.Graphic singleColorBarGraphic;
+    public TextMeshProUGUI textMaxPa;
+    public TextMeshProUGUI textThreeQuartersPa;
+    public TextMeshProUGUI textMidPa;
+    public TextMeshProUGUI textQuarterPa;
+    public TextMeshProUGUI textMinPa;
 
     [Header("Hover Tooltip UI Elements")]
     public GameObject tooltipPanel;
@@ -54,7 +62,7 @@ public class AdvancedWaveManager : MonoBehaviour
     private AudioSource audioSource;
     private List<GameObject> activeWaves = new List<GameObject>();
     
-    // Core analytical variables (Now driven dynamically by Sliders)
+    // Core analytical variables
     private float principalFrequency = 343f;
     private float calculatedRMS = 0f;
     private float peakPressure = 0f;
@@ -62,9 +70,9 @@ public class AdvancedWaveManager : MonoBehaviour
     private bool analysisComplete = false;
 
     // Internal structural metrics configuration targets
-    private float decayPower = 1.5f;
+    private float decayPower = 1.0f;
     private int stepMultiplier = 1;
-    private int numHarmonics = 3;
+    private int numHarmonics = 0;
 
     private Vector3 chamberMin = new Vector3(-3.35f, 0.00f, -5.00f);
     private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);
@@ -85,8 +93,21 @@ public class AdvancedWaveManager : MonoBehaviour
             generateButton.onClick.AddListener(ReadSlidersAndRebuildSimulation);
         }
 
-        // UPDATED: Boots up using your default slider values directly on frame one
-        ReadSlidersAndRebuildSimulation();
+        // Setup baseline structural defaults (Pure fundamental sine wave on frame one)
+        principalFrequency = 343f;
+        calculatedRMS = 0.5f; 
+        numHarmonics = 0;   
+        decayPower = 1.0f;   
+        stepMultiplier = 1;
+
+        // Sync and force the text label bridge objects to display baseline layout numbers
+        if (sliderFrequency != null) { sliderFrequency.value = principalFrequency; UpdateSliderLabel(sliderFrequency); }
+        if (sliderRMS != null) { sliderRMS.value = calculatedRMS; UpdateSliderLabel(sliderRMS); }
+        if (sliderCount != null) { sliderCount.value = numHarmonics; UpdateSliderLabel(sliderCount); }
+        if (sliderPower != null) { sliderPower.value = decayPower; UpdateSliderLabel(sliderPower); }
+        if (sliderStep != null) { sliderStep.value = stepMultiplier; UpdateSliderLabel(sliderStep); }
+
+        ConfigureAndStartSimulation();
     }
 
     void Update()
@@ -95,61 +116,117 @@ public class AdvancedWaveManager : MonoBehaviour
         HandleWaveInterrogation();
     }
 
-    /// <summary>
-    /// Reads current slider configurations from UI layout elements
-    /// and updates the local internal state parameters.
-    /// </summary>
     public void ReadSlidersAndRebuildSimulation()
     {
+        // Fallback hooks to handle dynamic context finding if links break
+        if (sliderFrequency == null) { GameObject go = GameObject.Find("Slider_Frequency"); if (go != null) sliderFrequency = go.GetComponent<Slider>(); }
+        if (sliderRMS == null) { GameObject go = GameObject.Find("Slider_RMS"); if (go != null) sliderRMS = go.GetComponent<Slider>(); }
+        if (sliderCount == null) { GameObject go = GameObject.Find("Slider_Count"); if (go != null) sliderCount = go.GetComponent<Slider>(); }
+        if (sliderPower == null) { GameObject go = GameObject.Find("Slider_Power"); if (go != null) sliderPower = go.GetComponent<Slider>(); }
+        if (sliderStep == null) { GameObject go = GameObject.Find("Slider_Step"); if (go != null) sliderStep = go.GetComponent<Slider>(); }
+
+        // Fetch current values
         if (sliderFrequency != null) principalFrequency = sliderFrequency.value;
         if (sliderRMS != null) calculatedRMS = sliderRMS.value;
         if (sliderCount != null) numHarmonics = Mathf.RoundToInt(sliderCount.value);
         if (sliderPower != null) decayPower = sliderPower.value;
         if (sliderStep != null) stepMultiplier = Mathf.RoundToInt(sliderStep.value);
 
-        // UPDATED FOR STEP 3: Re-routed away from disk discovery straight into the physics compiler
+        Debug.Log($"UI Settings Read - Freq: {principalFrequency}Hz, RMS: {calculatedRMS}, Harmonics: {numHarmonics}");
+        
         ConfigureAndStartSimulation();
     }
 
-    /// <summary>
-    /// ADDED FOR STEP 3: Bypasses file loading entirely. Synthesizes the exact 
-    /// harmonic vector arrays mathematical fields from the slider states instantly.
-    /// </summary>
     public void ConfigureAndStartSimulation()
     {
         analysisComplete = false;
         System.Array.Clear(harmonicAmplitudes, 0, harmonicAmplitudes.Length);
 
-        // 1. Assign the fundamental baseline core energy (Index 0 = 1f)
         harmonicAmplitudes[0] = calculatedRMS;
-        peakPressure = calculatedRMS * 1.414f; // Clean sine amplitude peak scaling translation
+        peakPressure = calculatedRMS * 1.414f; 
 
-        // 2. Synthesize upper overtone weights using the Python decay profile matching step choice configurations
         if (numHarmonics > 0)
         {
             for (int idx = 1; idx <= numHarmonics; idx++)
             {
-                // stepMultiplier = 1 -> Multipliers: 2, 3, 4 (Sequential series)
-                // stepMultiplier = 2 -> Multipliers: 3, 5, 7 (Odd series)
                 int multiplier = 1 + (stepMultiplier * idx);
-
-                // Stop assigning weights if they exceed our 4-layer physical visualization collection structures
                 if (multiplier > 4) continue;
-
-                // Core exponential decay drop algorithm ported directly from the custom script framework
                 harmonicAmplitudes[multiplier - 1] = calculatedRMS / Mathf.Pow(multiplier, decayPower);
             }
         }
 
-        analysisComplete = true;
+        // Execute procedural layout calculations
+        UpdateFivePointColorLegend();
+        GenerateDynamicLegendTexture();
 
-        // Instantly generate the 3D visual slices inside your room volume layout
+        analysisComplete = true;
         GenerateStaticFourierSlices();
     }
 
-    // NOTE: DiscoverAndAnalyzeLatestWav, LoadAndAnalyzeAudioPipeline, and ExecuteInPlaceCooleyTukeyFFT
-    // have been hidden/bypassed here since our data stream is now purely procedural. 
-    // They are left completely out of the execution line now.
+    private void UpdateFivePointColorLegend()
+    {
+        float halfPeak = peakPressure * 0.5f;
+
+        if (textMaxPa != null) textMaxPa.text = $"+{peakPressure:F3} Pa";
+        if (textThreeQuartersPa != null) textThreeQuartersPa.text = $"+{halfPeak:F3} Pa";
+        if (textMidPa != null) textMidPa.text = "0.000 Pa";
+        if (textQuarterPa != null) textQuarterPa.text = $"-{halfPeak:F3} Pa";
+        if (textMinPa != null) textMinPa.text = $"-{peakPressure:F3} Pa";
+    }
+
+    private void GenerateDynamicLegendTexture()
+    {
+        if (singleColorBarGraphic == null) return;
+
+        BipolarSpectrumPair activePalette = harmonicColorPalettes[0];
+        int textureHeight = 256;
+        Texture2D gradientTexture = new Texture2D(1, textureHeight, TextureFormat.RGBA32, false);
+        gradientTexture.wrapMode = TextureWrapMode.Clamp;
+        gradientTexture.filterMode = FilterMode.Bilinear;
+
+        for (int y = 0; y < textureHeight; y++)
+        {
+            float normalizedY = (float)y / (textureHeight - 1);
+            Color pixelColor;
+
+            if (normalizedY < 0.5f)
+            {
+                float t = normalizedY * 2f; 
+                pixelColor = Color.Lerp(activePalette.lowPressureTrough, activePalette.zeroPressureEquilibrium, t);
+            }
+            else
+            {
+                float t = (normalizedY - 0.5f) * 2f; 
+                pixelColor = Color.Lerp(activePalette.zeroPressureEquilibrium, activePalette.highPressureCrest, t);
+            }
+
+            gradientTexture.SetPixel(0, y, pixelColor);
+        }
+
+        gradientTexture.Apply();
+
+        // 1. Check for a standard Image component first
+        if (singleColorBarGraphic is UnityEngine.UI.Image uiImage)
+        {
+            uiImage.color = Color.white;
+            uiImage.sprite = Sprite.Create(gradientTexture, new Rect(0, 0, 1, textureHeight), new Vector2(0.5f, 0.5f));
+        }
+        // 2. FALLBACK: Direct texture injection for Raw Image components
+        else if (singleColorBarGraphic is UnityEngine.UI.RawImage rawImage)
+        {
+            rawImage.color = Color.white;
+            rawImage.texture = gradientTexture; // Feeds the raw texture bytes straight to your RawImage!
+        }
+    }
+
+    private void UpdateSliderLabel(Slider targetSlider)
+    {
+        SliderTextBridge bridge = targetSlider.GetComponent<SliderTextBridge>();
+        if (bridge != null)
+        {
+            bridge.UpdateTextValue(targetSlider.value);
+        }
+    }
 
     void GenerateStaticFourierSlices()
     {
@@ -158,8 +235,8 @@ public class AdvancedWaveManager : MonoBehaviour
 
         if (wavePrefab == null) return;
 
-        float roomFadeMaxDistance = chamberMax.z - chamberMin.z; // 10.0 meters total long
-        float baseWavelength = SPEED_OF_SOUND / principalFrequency; // Dynamic to slider now!
+        float roomFadeMaxDistance = chamberMax.z - chamberMin.z; 
+        float baseWavelength = SPEED_OF_SOUND / principalFrequency; 
         
         float totalWavelengthsInChamber = roomFadeMaxDistance / baseWavelength; 
         int slicesPerWavelength = 6; 
@@ -169,7 +246,6 @@ public class AdvancedWaveManager : MonoBehaviour
 
         float spatialStepDistance = roomFadeMaxDistance / totalSlices;
         MaterialPropertyBlock propBlock = new MaterialPropertyBlock();
-
         float sourceOriginSafetyOffset = 0.05f; 
 
         for (int i = 1; i <= totalSlices; i++)
