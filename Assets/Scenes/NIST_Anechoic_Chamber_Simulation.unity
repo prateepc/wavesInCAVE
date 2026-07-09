@@ -3547,6 +3547,12 @@ MonoBehaviour:
   sliderStep: {fileID: 2039425654}
   generateButton: {fileID: 2122522064}
   uiTextDisplay: {fileID: 430802690}
+  singleColorBarGraphic: {fileID: 3136984}
+  textMaxPa: {fileID: 1382576423}
+  textThreeQuartersPa: {fileID: 69517116}
+  textMidPa: {fileID: 2020197852}
+  textQuarterPa: {fileID: 156825318}
+  textMinPa: {fileID: 1703327678}
   tooltipPanel: {fileID: 1759306589}
   tooltipText: {fileID: 712449075}
   caveWandPointer: {fileID: 0}

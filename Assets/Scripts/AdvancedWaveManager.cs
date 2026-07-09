@@ -78,6 +78,11 @@ public class AdvancedWaveManager : MonoBehaviour
     private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);
     private const float SPEED_OF_SOUND = 343.0f;
 
+    // Step 4 Audio Pipeline State Variables
+    private double audioPhase = 0.0;
+    private double samplingFrequency = 48000.0; // Standard Unity baseline rate; dynamically updated in code
+    private float outMuteFade = 1.0f;           // Smooth volume fader to prevent sudden clicks or audio pops
+
     void Start()
     {
         audioSource = GetComponent<AudioSource>();

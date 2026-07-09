@@ -1,5 +1,11 @@
 {
   "dependencies": {
+    "com.middlevr": {
+      "version": "file:/Users/aritro/Downloads/com.middlevr.tgz",
+      "depth": 0,
+      "source": "local-tarball",
+      "dependencies": {}
+    },
     "com.unity.collab-proxy": {
       "version": "2.12.4",
       "depth": 0,
