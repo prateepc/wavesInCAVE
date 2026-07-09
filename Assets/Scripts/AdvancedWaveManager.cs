@@ -80,12 +80,33 @@ public class AdvancedWaveManager : MonoBehaviour
 
     // Step 4 Audio Pipeline State Variables
     private double audioPhase = 0.0;
-    private double samplingFrequency = 48000.0; // Standard Unity baseline rate; dynamically updated in code
-    private float outMuteFade = 1.0f;           // Smooth volume fader to prevent sudden clicks or audio pops
+    private double samplingFrequency = 48000.0; 
+    private float outMuteFade = 1.0f;           
 
     void Start()
     {
+        // Force complete structural variable allocation before anything else initializes
+        principalFrequency = 343f;
+        calculatedRMS = 0.5f; 
+        numHarmonics = 0;   
+        decayPower = 1.0f;   
+        stepMultiplier = 1;
+        peakPressure = calculatedRMS * 1.414f;
+        
+        System.Array.Clear(harmonicAmplitudes, 0, harmonicAmplitudes.Length);
+        harmonicAmplitudes[0] = calculatedRMS;
+
+        // SAFE HOOK: Cache the system sampling rate immediately on the main thread
+        samplingFrequency = AudioSettings.outputSampleRate;
+        if (samplingFrequency <= 0) samplingFrequency = 48000.0;
+
         audioSource = GetComponent<AudioSource>();
+        if (audioSource != null)
+        {
+            audioSource.playOnAwake = true;
+            audioSource.loop = true;
+        }
+
         if (uiTextDisplay == null)
         {
             GameObject foundUIObject = GameObject.Find("TelemetryDisplay");
@@ -98,20 +119,14 @@ public class AdvancedWaveManager : MonoBehaviour
             generateButton.onClick.AddListener(ReadSlidersAndRebuildSimulation);
         }
 
-        // Setup baseline structural defaults (Pure fundamental sine wave on frame one)
-        principalFrequency = 343f;
-        calculatedRMS = 0.5f; 
-        numHarmonics = 0;   
-        decayPower = 1.0f;   
-        stepMultiplier = 1;
-
-        // Sync and force the text label bridge objects to display baseline layout numbers
+        // Force the visual text label bridge items to match our baseline layout metrics
         if (sliderFrequency != null) { sliderFrequency.value = principalFrequency; UpdateSliderLabel(sliderFrequency); }
         if (sliderRMS != null) { sliderRMS.value = calculatedRMS; UpdateSliderLabel(sliderRMS); }
         if (sliderCount != null) { sliderCount.value = numHarmonics; UpdateSliderLabel(sliderCount); }
         if (sliderPower != null) { sliderPower.value = decayPower; UpdateSliderLabel(sliderPower); }
         if (sliderStep != null) { sliderStep.value = stepMultiplier; UpdateSliderLabel(sliderStep); }
 
+        // Fire off the generation pass safely
         ConfigureAndStartSimulation();
     }
 
@@ -119,6 +134,11 @@ public class AdvancedWaveManager : MonoBehaviour
     {
         UpdateUIScreen();
         HandleWaveInterrogation();
+
+        // NEW: Safely maintain sample rate tracking on the main thread
+        samplingFrequency = AudioSettings.outputSampleRate;
+
+        outMuteFade = Mathf.MoveTowards(outMuteFade, 1.0f, Time.deltaTime * 2.0f);
     }
 
     public void ReadSlidersAndRebuildSimulation()
@@ -145,6 +165,7 @@ public class AdvancedWaveManager : MonoBehaviour
     public void ConfigureAndStartSimulation()
     {
         analysisComplete = false;
+        outMuteFade = 0.0f; // Drop volume instantly to zero so it can smoothly fade back in pop-free
         System.Array.Clear(harmonicAmplitudes, 0, harmonicAmplitudes.Length);
 
         harmonicAmplitudes[0] = calculatedRMS;
@@ -210,17 +231,17 @@ public class AdvancedWaveManager : MonoBehaviour
 
         gradientTexture.Apply();
 
-        // 1. Check for a standard Image component first
+        // 1. Check for standard image architectures
         if (singleColorBarGraphic is UnityEngine.UI.Image uiImage)
         {
             uiImage.color = Color.white;
             uiImage.sprite = Sprite.Create(gradientTexture, new Rect(0, 0, 1, textureHeight), new Vector2(0.5f, 0.5f));
         }
-        // 2. FALLBACK: Direct texture injection for Raw Image components
+        // 2. Direct texture deployment mapping for Raw Image layouts
         else if (singleColorBarGraphic is UnityEngine.UI.RawImage rawImage)
         {
             rawImage.color = Color.white;
-            rawImage.texture = gradientTexture; // Feeds the raw texture bytes straight to your RawImage!
+            rawImage.texture = gradientTexture;
         }
     }
 
@@ -381,5 +402,58 @@ public class AdvancedWaveManager : MonoBehaviour
     {
         if (uiTextDisplay == null) return;
         string freqText = analysisComplete ? $"{principalFrequency:F1} Hz" : "Computing Fast Fourier Transform...";
+    }
+
+    /// <summary>
+    /// Unity DSP Callback Engine: Synthesizes continuous wave samples on the audio thread
+    /// to seamlessly align the physical acoustics with visual configurations.
+    /// </summary>
+    void OnAudioFilterRead(float[] data, int channels)
+    {
+        // SAFETY GUARD: No longer executing illegal main-thread calls here!
+        if (!analysisComplete || calculatedRMS <= 0.001f || principalFrequency <= 0.1f)
+        {
+            System.Array.Clear(data, 0, data.Length);
+            return;
+        }
+
+        for (int i = 0; i < data.Length; i += channels)
+        {
+            float currentAcousticSampleValue = 0f;
+
+            // 1. Synthesize baseline fundamental tone (Uses the safely cached samplingFrequency variable)
+            double fundamentalAngularVelocity = 2.0 * System.Math.PI * principalFrequency / samplingFrequency;
+            currentAcousticSampleValue += harmonicAmplitudes[0] * (float)System.Math.Sin(audioPhase);
+
+            // 2. Interleave harmonic overtones dynamically matching slider arrays
+            if (numHarmonics > 0)
+            {
+                for (int h = 1; h <= numHarmonics; h++)
+                {
+                    int harmonicMultiplier = 1 + (stepMultiplier * h);
+                    if (harmonicMultiplier > 4) continue;
+
+                    float harmonicWeight = harmonicAmplitudes[harmonicMultiplier - 1];
+                    if (harmonicWeight > 0f)
+                    {
+                        currentAcousticSampleValue += harmonicWeight * (float)System.Math.Sin(audioPhase * harmonicMultiplier);
+                    }
+                }
+            }
+
+            currentAcousticSampleValue = Mathf.Clamp(currentAcousticSampleValue, -1.0f, 1.0f);
+
+            for (int c = 0; c < channels; c++)
+            {
+                data[i + c] = currentAcousticSampleValue * outMuteFade;
+            }
+
+            audioPhase += fundamentalAngularVelocity;
+            
+            if (audioPhase > 2.0 * System.Math.PI)
+            {
+                audioPhase %= (2.0 * System.Math.PI);
+            }
+        }
     }
 }
