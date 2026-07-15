@@ -1,23 +1,29 @@
 using UnityEngine;
 using UnityEngine.UI;
 using System.IO;
+using System.Collections; // Required for Coroutines (IEnumerator)
+using UnityEngine.Networking; // Required for Web Requests
 using TMPro;
 
 public class AudioFileScanner : MonoBehaviour
 {
+    [Header("Path Settings")]
     [HideInInspector]
     public string folderPath; 
 
+    [Header("UI References")]
     public GameObject buttonPrefab;   
     public Transform contentContainer; 
+    public GameObject fileSelectorPanel; // Drag your Panel_FileSelector here
+    public GameObject simulationContent; // Drag your simulation manager/mesh here
+
+    [Header("Audio Setup")]
+    public AudioSource simulationAudioSource; // Drag your simulation's AudioSource here
 
     void Awake()
     {
-        // 1. Grab the base folder system path
         string baseUserPath = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments);
 
-        // 2. Cross-platform check: If we are on Mac, "MyDocuments" often resolves to the root user folder ("/Users/username").
-        // We append the actual "Documents" folder manually if it isn't already in the path string.
         if (Application.platform == RuntimePlatform.OSXEditor || Application.platform == RuntimePlatform.OSXPlayer)
         {
             if (!baseUserPath.EndsWith("Documents"))
@@ -26,54 +32,154 @@ public class AudioFileScanner : MonoBehaviour
             }
         }
 
-        // 3. Cleanly stitch together the rest of the target folders
         folderPath = Path.Combine(baseUserPath, "wavesInCAVE", "Recordings");
-
-        Debug.Log("[Acoustic ADT] Resolved platform-agnostic path: " + folderPath);
     }
 
     void Start()
     {
-        // This is line 27 where the error was happening. It can now see the method below!
+        AudioListener.pause = false;
+        AudioListener.volume = 1.0f;
+    
         RefreshFileList();
     }
 
     public void RefreshFileList()
     {
-        // 1. Clear out old buttons from previous scans
         foreach (Transform child in contentContainer)
         {
             Destroy(child.gameObject);
         }
 
-        // 2. Safety check: Create the folder if it doesn't exist yet
         if (!Directory.Exists(folderPath))
         {
             Directory.CreateDirectory(folderPath);
         }
 
-        // 3. Gather all WAV files from the folder
         string[] audioFiles = Directory.GetFiles(folderPath, "*.wav");
 
-        // 4. Loop through every file found and spawn a custom button for it
         foreach (string filePath in audioFiles)
         {
             string fileName = Path.GetFileName(filePath);
-
-            // Instantiate a new button inside the layout group container
             GameObject newButton = Instantiate(buttonPrefab, contentContainer);
-
-            // Update the button's text to display the actual file name
             newButton.GetComponentInChildren<TextMeshProUGUI>().text = fileName;
 
-            // Setup the click event dynamically
             Button btnComponent = newButton.GetComponent<Button>();
+            
+            // Set up click action to load and play this specific file
             btnComponent.onClick.AddListener(() => LoadAudioIntoSimulation(filePath));
         }
     }
 
+    // This triggers the asynchronous loading process
     void LoadAudioIntoSimulation(string selectedFilePath)
     {
-        Debug.Log("[Acoustic ADT] User selected audio file: " + selectedFilePath);
+        StartCoroutine(LoadAudioClipCoroutine(selectedFilePath));
     }
-} // <--- Make sure this final closing bracket is present to close the class!
+
+    // Coroutine that runs in the background to load the audio without freezing your screen
+    IEnumerator LoadAudioClipCoroutine(string absolutePath)
+    {
+        // Formulate a robust macOS-friendly URI path (file:///...)
+        string uriPath;
+        #if UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX
+            uriPath = "file://" + absolutePath; 
+            if (!uriPath.StartsWith("file:///"))
+            {
+                uriPath = uriPath.Replace("file://", "file:///");
+            }
+        #else
+            uriPath = "file:///" + absolutePath;
+        #endif
+
+        // Clean up spaces/special characters in the path string
+        uriPath = System.Uri.EscapeUriString(uriPath);
+
+        Debug.Log("[Acoustic Diagnostics] Attempting to fetch audio from: " + uriPath);
+
+        // Send request to load the audio clip as a WAV file
+        using (UnityWebRequest uwr = UnityWebRequestMultimedia.GetAudioClip(uriPath, AudioType.WAV))
+        {
+            yield return uwr.SendWebRequest();
+
+            if (uwr.result == UnityWebRequest.Result.ConnectionError || uwr.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("[Acoustic Diagnostics] Web Request Error: " + uwr.error);
+            }
+            else
+            {
+                // Extract the downloaded AudioClip
+                AudioClip loadedClip = DownloadHandlerAudioClip.GetContent(uwr);
+                
+                if (loadedClip == null)
+                {
+                    Debug.LogError("[Acoustic Diagnostics] CRITICAL: Downloaded AudioClip reference is NULL!");
+                }
+                else
+                {
+                    loadedClip.name = Path.GetFileName(absolutePath);
+
+                    // --- STEP 4 AUDIO FILE FORMAT VALIDATION ---
+                    Debug.Log($"[Acoustic Diagnostics] --- CLIP VERIFICATION ---");
+                    Debug.Log($"Name: {loadedClip.name}");
+                    Debug.Log($"Load State: {loadedClip.loadState}"); 
+                    Debug.Log($"Channels: {loadedClip.channels}");
+                    Debug.Log($"Frequency: {loadedClip.frequency} Hz");
+                    Debug.Log($"Length: {loadedClip.length:F2} seconds");
+                    Debug.Log($"Samples Count: {loadedClip.samples}");
+                    Debug.Log($"----------------------------------------");
+
+                    if (loadedClip.samples == 0)
+                    {
+                        Debug.LogError("[Acoustic Diagnostics] FAIL: The file was successfully retrieved, but it contains 0 audio samples. Unity failed to decode this WAV format! Your WAV encoding may be unsupported.");
+                    }
+
+                    // Assign the clip to your visualizer's AudioSource and play it
+                    if (simulationAudioSource != null)
+                    {
+                        simulationAudioSource.clip = loadedClip;
+                        // Inside LoadAudioClipCoroutine, right before simulationAudioSource.Play();
+                        loadedClip.LoadAudioData(); // Force immediate decompression
+                        simulationAudioSource.Play();
+                        
+                        // Run active playback check on the next frame
+                        StartCoroutine(VerifyPlaybackCoroutine(simulationAudioSource));
+
+                        TransitionToSimulation();
+                    }
+                    else
+                    {
+                        Debug.LogError("[Acoustic Diagnostics] FAIL: Missing an assigned AudioSource component in the Inspector!");
+                    }
+                }
+            }
+        }
+    }
+
+    IEnumerator VerifyPlaybackCoroutine(AudioSource source)
+    {
+        yield return null; // Wait 1 frame for AudioSource.Play() to register on the main thread
+
+        Debug.Log($"[Acoustic Diagnostics] --- SPEAKER STATE CHECK ---");
+        Debug.Log($"Speaker Clip Assigned: {(source.clip != null ? source.clip.name : "NULL!")}");
+        Debug.Log($"Speaker Volume Level: {source.volume}");
+        Debug.Log($"Is Speaker Physically Playing? {source.isPlaying}");
+        Debug.Log($"Mute Active? {source.mute}");
+        Debug.Log($"----------------------------------------");
+        
+        if (source.clip != null && source.isPlaying)
+        {
+            Debug.Log("[Acoustic Diagnostics] SUCCESS! Audio is decoded, loaded, and actively playing!");
+        }
+        else if (!source.isPlaying)
+        {
+            Debug.LogError("[Acoustic Diagnostics] FAIL: AudioSource is NOT playing! Check if the Speaker GameObject itself or its parent is being deactivated during the panel transition.");
+        }
+    }
+
+    void TransitionToSimulation()
+    {
+        // Turn off the file browser and turn on the simulation visual objects
+        if (fileSelectorPanel != null) fileSelectorPanel.SetActive(false);
+        if (simulationContent != null) simulationContent.SetActive(true);
+    }
+}
