@@ -4,5 +4,11 @@
 EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
-  m_Scenes: []
+  m_Scenes:
+  - enabled: 0
+    path: Assets/wavesInCAVE2.unity
+    guid: ebf81bdc7fb074a8c8f8a8391708f279
+  - enabled: 1
+    path: Assets/Scenes/NIST_Anechoic_Chamber_Simulation.unity
+    guid: 38cc583401a73db56a6983b113fdaba0
   m_configObjects: {}
