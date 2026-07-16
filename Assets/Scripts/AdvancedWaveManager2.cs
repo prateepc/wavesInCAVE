@@ -14,7 +14,9 @@ public class AdvancedWaveManager2 : MonoBehaviour
         public Color highPressureCrest;
     }
 
-    [Header("Audio File Target")]
+    [Header("Manual Audio Source Configuration")]
+    [Tooltip("Drag and drop your single audio file here in the Unity Inspector.")]
+    public AudioClip manualAudioClip;
     [Tooltip("The speaker audio source playing the loaded WAV recording.")]
     public AudioSource audioSource;
     [Tooltip("Increases or decreases wave size in response to the recording's volume.")]
@@ -69,6 +71,23 @@ public class AdvancedWaveManager2 : MonoBehaviour
             audioSource = GetComponent<AudioSource>();
         }
 
+        // Apply manual audio clip settings immediately
+        if (audioSource != null)
+        {
+            if (manualAudioClip != null)
+            {
+                audioSource.clip = manualAudioClip;
+                audioSource.loop = true;
+                audioSource.playOnAwake = true;
+                audioSource.Play();
+                Debug.Log($"Playing manual audio file: {manualAudioClip.name}");
+            }
+            else
+            {
+                Debug.LogWarning("Please drag an AudioClip into 'manualAudioClip' in the Inspector.");
+            }
+        }
+
         if (uiTextDisplay == null)
         {
             GameObject foundUIObject = GameObject.Find("TelemetryDisplay");
@@ -96,7 +115,7 @@ public class AdvancedWaveManager2 : MonoBehaviour
     /// </summary>
     void AnalyzeAudioSourceVolume()
     {
-        if (audioSource != null && audioSource.isPlaying)
+        if (audioSource != null && audioSource.isPlaying && audioSource.clip != null)
         {
             // 1. Grab current sound wave sample values
             audioSource.GetOutputData(audioSamples, 0);
@@ -323,7 +342,7 @@ public class AdvancedWaveManager2 : MonoBehaviour
         }
         else
         {
-            uiTextDisplay.text = "<b>SYSTEM STANDBY</b>\nSelect a recording to begin wave analysis.";
+            uiTextDisplay.text = "<b>SYSTEM STANDBY</b>\nAssign an audio clip in the inspector to begin.";
         }
     }
 }
