@@ -12,7 +12,7 @@ import sounddevice as sd
 class AdvancedWavAnalyzerApp:
     def __init__(self, root, initial_file=None):
         self.root = root
-        self.root.title("Real-Time Automated FFT Analyzer (Silenced Hardware Thread)")
+        self.root.title("Real-Time Automated FFT Analyzer (Auto-Scaling Y-Axis)")
         self.root.geometry("1100x850")
 
         # Audio Data Variables
@@ -194,10 +194,7 @@ class AdvancedWavAnalyzerApp:
         self.play_start_time = time.time()
         self.current_analysis_time = 0.0
         
-        # --- CRITICAL FIX: ASSIGN HARDWARE BLOCKSIZE BUFFER PROTECTION ---
-        # A large blocksize allocation completely separates the audio stream from rendering lag
         sd.play(self.data, samplerate=self.sample_rate, loop=True, blocksize=4096)
-        
         self.automated_playback_updater()
 
     def stop_audio(self):
@@ -239,10 +236,9 @@ class AdvancedWavAnalyzerApp:
         if current_file_time < (self.current_analysis_time - self.cached_delta_t):
             self.current_analysis_time = 0.0
 
-        # Increased checking window slightly to lower CPU thrashing
         self.playback_timer_id = self.root.after(20, self.automated_playback_updater)
     def compute_fft_snapshot(self, target_time):
-        """Extracts the audio slice, evaluates the spectrum, and applies throttled interface drawing."""
+        """Extracts the audio slice, evaluates the spectrum, and applies auto-scaled Y-limits."""
         if self.data is None: return
 
         # Sync the green line vector marker coordinate instantly
@@ -270,25 +266,35 @@ class AdvancedWavAnalyzerApp:
 
             # Throttle UI text adjustments
             current_now = time.time()
-            if (current_now - self.last_pitch_update_time) > 0.25:  # 4 times per second
+            if (current_now - self.last_pitch_update_time) > 0.25:
                 valid_idx = np.where((fft_freqs >= 40) & (fft_freqs <= 5000))
                 if len(valid_idx) > 0 and len(valid_idx[0]) > 0:
                     peak_idx = valid_idx[0][np.argmax(fft_vals[valid_idx])]
                     self.lbl_pitch.config(text="Live Pitch: " + str(round(float(fft_freqs[peak_idx]), 1)) + " Hz")
                 self.last_pitch_update_time = current_now
 
+            # --- DYNAMIC FOCUS Y-AXIS SCALE ENGINE ---
             if self.db_scale_var.get():
                 fft_vals = 20 * np.log10(fft_vals + 1e-8)
                 self.ax_fft.set_ylabel("Magnitude (dB)")
+                
+                # Capture current snapshot peak maximum
+                max_db = np.max(fft_vals)
+                
+                # Anchor the window view to look at a clean 65 dB field immediately below the peak
+                y_min = max_db - 65.0
+                y_max = max_db + 5.0
+                self.ax_fft.set_ylim(y_min, y_max)
             else:
                 self.ax_fft.set_ylabel("Magnitude (Linear)")
+                max_lin = np.max(fft_vals)
+                
+                # Keep linear scale anchored to 0 base down to prevent drifting
+                self.ax_fft.set_ylim(0.0, max_lin * 1.1 if max_lin > 0 else 1.0)
 
             # Update line plots
             self.line_fft.set_data(fft_freqs, fft_vals)
             self.ax_fft.set_xlim(0, self.slider_freq.get())
-            
-            if len(fft_vals) > 0:
-                self.ax_fft.set_ylim(np.min(fft_vals) - 2, np.max(fft_vals) + 5)
 
         self.ax_fft.set_title(f"FFT Window Snapshot at {target_time:.2f}s (Step Δt = {self.cached_delta_t:.2f}s | Mode: {win_type})")
         self.canvas.draw_idle()
@@ -300,7 +306,7 @@ class AdvancedWavAnalyzerApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    cmd_file = sys.argv[1] if len(sys.argv) > 1 else None
+    cmd_file = sys.argv if len(sys.argv) > 1 else None
     app = AdvancedWavAnalyzerApp(root, initial_file=cmd_file)
     root.mainloop()
 
