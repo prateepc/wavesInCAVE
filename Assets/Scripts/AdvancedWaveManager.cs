@@ -19,10 +19,10 @@ public class AdvancedWaveManager : MonoBehaviour
     [Header("UI Canvas Configuration Elements")] 
     public Slider sliderFrequency;
     public Slider sliderRMS;
-    public Slider sliderDuration;
     public Slider sliderCount;
     public Slider sliderPower;
     public Slider sliderStep;
+    public Slider sliderFFTResolution; // Dynamic bin sizing control layout slider
     public Button generateButton;
 
     [Header("UI Display Links")]
@@ -59,8 +59,30 @@ public class AdvancedWaveManager : MonoBehaviour
         new BipolarSpectrumPair { lowPressureTrough = new Color(0.2f,0f,0.2f), zeroPressureEquilibrium = Color.white, highPressureCrest = Color.magenta } // 4f
     };
 
+    [Header("Real-Time Graphing System UI links")]
+    [Tooltip("The manual toggle control button link.")]
+    public Button toggleGraphButton;
+    [Tooltip("The parent object container containing our visual chart nodes.")]
+    public GameObject fftGraphPanel;
+    [Tooltip("Basic layout node image prefab used for generating spectrum layout nodes.")]
+    public GameObject graphBarPrefab;
+    [Tooltip("Total vertical multiplier adjusting spectrum display height tracking arrays.")]
+    public float graphBarHeightScale = 300.0f;
+
+    [Header("Multi-Peak Axis Tracking UI Elements")]
+    [Tooltip("The prefab used to spawn sliding frequency labels along the X-axis.")]
+    public GameObject peakFreqLabelPrefab;
+    [Tooltip("The prefab used to spawn sliding amplitude labels along the Y-axis.")]
+    public GameObject peakAmpLabelPrefab;
+    [Tooltip("Minimum threshold of energy required to count as an active peak.")]
+    public float peakDetectionThreshold = 0.005f;
+    [Tooltip("A general sensitivity modifier translating raw spectral magnitudes back into printable Pascal pressure layouts.")]
+    public float graphSensitivityMultiplier = 20.0f;
+
     private AudioSource audioSource;
     private List<GameObject> activeWaves = new List<GameObject>();
+    private List<RectTransform> initializedGraphBars = new List<RectTransform>();
+    private List<GameObject> activeLabelPool = new List<GameObject>();
     
     // Core analytical variables
     private float principalFrequency = 343f;
@@ -78,14 +100,17 @@ public class AdvancedWaveManager : MonoBehaviour
     private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);
     private const float SPEED_OF_SOUND = 343.0f;
 
-    // Step 4 Audio Pipeline State Variables
+    // Audio Pipeline State Variables
     private double audioPhase = 0.0;
     private double samplingFrequency = 48000.0; 
     private float outMuteFade = 1.0f;           
 
+    // Dynamic Fourier Array Resolution Parameters
+    private int currentFFTSize = 1024;
+    private float[] spectrumDataArray;
+
     void Start()
     {
-        // Force complete structural variable allocation before anything else initializes
         principalFrequency = 343f;
         calculatedRMS = 0.5f; 
         numHarmonics = 0;   
@@ -96,7 +121,6 @@ public class AdvancedWaveManager : MonoBehaviour
         System.Array.Clear(harmonicAmplitudes, 0, harmonicAmplitudes.Length);
         harmonicAmplitudes[0] = calculatedRMS;
 
-        // SAFE HOOK: Cache the system sampling rate immediately on the main thread
         samplingFrequency = AudioSettings.outputSampleRate;
         if (samplingFrequency <= 0) samplingFrequency = 48000.0;
 
@@ -119,14 +143,29 @@ public class AdvancedWaveManager : MonoBehaviour
             generateButton.onClick.AddListener(ReadSlidersAndRebuildSimulation);
         }
 
-        // Force the visual text label bridge items to match our baseline layout metrics
+        if (toggleGraphButton != null)
+        {
+            toggleGraphButton.onClick.AddListener(ToggleGraphVisibilityState);
+        }
+
+       // Initialize Dynamic Power-of-Two FFT Resolution slider metrics
+        if (sliderFFTResolution != null)
+        {
+            sliderFFTResolution.minValue = 1; // Minimum changed to 1
+            sliderFFTResolution.maxValue = 7; // Maximum stays 7
+            sliderFFTResolution.wholeNumbers = true;
+            sliderFFTResolution.value = 1;    // Default baseline selection maps to 1024
+            UpdateSliderLabel(sliderFFTResolution);
+        }
+        UpdateFFTResolution(sliderFFTResolution != null ? (int)sliderFFTResolution.value : 1);
+        InitializeFFTGraphVisuals();
+
         if (sliderFrequency != null) { sliderFrequency.value = principalFrequency; UpdateSliderLabel(sliderFrequency); }
         if (sliderRMS != null) { sliderRMS.value = calculatedRMS; UpdateSliderLabel(sliderRMS); }
         if (sliderCount != null) { sliderCount.value = numHarmonics; UpdateSliderLabel(sliderCount); }
         if (sliderPower != null) { sliderPower.value = decayPower; UpdateSliderLabel(sliderPower); }
         if (sliderStep != null) { sliderStep.value = stepMultiplier; UpdateSliderLabel(sliderStep); }
 
-        // Fire off the generation pass safely
         ConfigureAndStartSimulation();
     }
 
@@ -134,38 +173,185 @@ public class AdvancedWaveManager : MonoBehaviour
     {
         UpdateUIScreen();
         HandleWaveInterrogation();
+        UpdateRealTimeFFTGraph();
 
-        // NEW: Safely maintain sample rate tracking on the main thread
         samplingFrequency = AudioSettings.outputSampleRate;
-
         outMuteFade = Mathf.MoveTowards(outMuteFade, 1.0f, Time.deltaTime * 2.0f);
+    }
+
+    public void UpdateFFTResolution(int sliderStepValue)
+    {
+        // Clamp incoming slider value to the strict 1-7 layout range
+        sliderStepValue = Mathf.Clamp(sliderStepValue, 1, 7);
+
+        // Linearly map slider values 1 through 7 to exponent values 10 through 12
+        // Step 1 -> 10 (1024)
+        // Step 4 -> 11 (2048)
+        // Step 7 -> 12 (4096)
+        float normalizedStep = (sliderStepValue - 1f) / 6f; // 0.0 to 1.0
+        int targetExponent = Mathf.RoundToInt(Mathf.Lerp(10f, 12f, normalizedStep));
+
+        currentFFTSize = (int)Mathf.Pow(2, targetExponent);
+        currentFFTSize = Mathf.Clamp(currentFFTSize, 1024, 4096);
+
+        // Reallocate internal matrix size arrays securely at runtime
+        spectrumDataArray = new float[currentFFTSize];
+    }
+
+    private void InitializeFFTGraphVisuals()
+    {
+        if (fftGraphPanel == null || graphBarPrefab == null) return;
+
+        RectTransform panelRect = fftGraphPanel.GetComponent<RectTransform>();
+        if (panelRect == null) return;
+
+        int totalVisualBars = 256;
+        float containerWidth = panelRect.rect.width;
+        float individualBarWidth = containerWidth / totalVisualBars;
+
+        for (int i = 0; i < totalVisualBars; i++)
+        {
+            GameObject barInstance = Instantiate(graphBarPrefab, fftGraphPanel.transform, false);
+            RectTransform barRect = barInstance.GetComponent<RectTransform>();
+            
+            if (barRect != null)
+            {
+                barRect.anchorMin = new Vector2(0f, 0f);
+                barRect.anchorMax = new Vector2(0f, 0f);
+                barRect.pivot = new Vector2(0.5f, 0f);
+                
+                barRect.anchoredPosition = new Vector2((i * individualBarWidth) + (individualBarWidth / 2f), 0f);
+                barRect.sizeDelta = new Vector2(individualBarWidth * 0.85f, 0f); 
+                
+                initializedGraphBars.Add(barRect);
+            }
+        }
+    }
+
+    public void ToggleGraphVisibilityState()
+    {
+        if (fftGraphPanel != null)
+        {
+            fftGraphPanel.SetActive(!fftGraphPanel.activeSelf);
+        }
+    }
+
+    private void UpdateRealTimeFFTGraph()
+    {
+        if (fftGraphPanel == null || !fftGraphPanel.activeSelf || audioSource == null || peakFreqLabelPrefab == null || peakAmpLabelPrefab == null || spectrumDataArray == null) return;
+
+        // 1. Gather dynamic high-resolution spectrum data matrices
+        audioSource.GetSpectrumData(spectrumDataArray, 0, FFTWindow.BlackmanHarris);
+
+        // Wipe old temporary axis text labels from the previous frame
+        for (int i = activeLabelPool.Count - 1; i >= 0; i--)
+        {
+            if (activeLabelPool[i] != null) Destroy(activeLabelPool[i]);
+        }
+        activeLabelPool.Clear();
+
+        float panelWidth = fftGraphPanel.GetComponent<RectTransform>().rect.width;
+
+        // 2. Map and scale visible display layout bars across dynamic logarithmic frequency maps
+        for (int i = 0; i < initializedGraphBars.Count; i++)
+        {
+            if (initializedGraphBars[i] == null) continue;
+
+            float normalizedPosition = (float)i / initializedGraphBars.Count;
+            int spectrumIndex = Mathf.FloorToInt(Mathf.Pow(normalizedPosition, 2f) * (currentFFTSize - i));
+            spectrumIndex = Mathf.Clamp(spectrumIndex, 0, currentFFTSize - 1);
+
+            float sampleIntensity = spectrumDataArray[spectrumIndex];
+            float dynamicHeightValue = Mathf.Clamp(sampleIntensity * graphBarHeightScale, 2f, graphBarHeightScale);
+
+            Vector2 alteredDimensions = initializedGraphBars[i].sizeDelta;
+            alteredDimensions.y = Mathf.Lerp(alteredDimensions.y, dynamicHeightValue, Time.deltaTime * 12f);
+            initializedGraphBars[i].sizeDelta = alteredDimensions;
+
+            // 3. Multi-Peak Axis Tracker (Local Maxima evaluation)
+            if (i > 0 && i < initializedGraphBars.Count - 1)
+            {
+                float currentVisualHeight = alteredDimensions.y;
+                float prevHeight = initializedGraphBars[i - 1].sizeDelta.y;
+
+                float nextHeight = dynamicHeightValue; 
+                if (i + 1 < initializedGraphBars.Count)
+                {
+                    float nextNorm = (float)(i + 1) / initializedGraphBars.Count;
+                    int nextIdx = Mathf.Clamp(Mathf.FloorToInt(Mathf.Pow(nextNorm, 2f) * (currentFFTSize - (i + 1))), 0, currentFFTSize - 1);
+                    nextHeight = Mathf.Clamp(spectrumDataArray[nextIdx] * graphBarHeightScale, 2f, graphBarHeightScale);
+                }
+
+                // If sample breaks baseline threshold boundaries and is taller than immediate neighbors
+                if (sampleIntensity > peakDetectionThreshold && currentVisualHeight > prevHeight && currentVisualHeight > nextHeight)
+                {
+                    // Calculate precise coordinate values from the visual layout
+                    float horizontalPercentage = (float)i / (initializedGraphBars.Count - 1);
+                    float targetXCoordinate = (horizontalPercentage * panelWidth) - (panelWidth / 2f);
+                    float peakBarLocalYHeight = alteredDimensions.y;
+
+                    float halfSampleRate = (float)(samplingFrequency / 2.0);
+                    float peakFrequency = spectrumIndex * halfSampleRate / currentFFTSize;
+                    float pressure = sampleIntensity * graphSensitivityMultiplier;
+
+                    // --- SPAWN FREQUENCY LABEL ---
+                    GameObject freqLabel = Instantiate(peakFreqLabelPrefab, fftGraphPanel.transform, false);
+                    activeLabelPool.Add(freqLabel);
+
+                    TextMeshProUGUI freqText = freqLabel.GetComponent<TextMeshProUGUI>();
+                    if (freqText != null)
+                    {
+                        freqText.text = $"{peakFrequency:F0}";
+                        RectTransform freqRect = freqLabel.GetComponent<RectTransform>();
+                        
+                        Vector3 localPos = freqRect.localPosition;
+                        localPos.x = targetXCoordinate;
+                        freqRect.localPosition = localPos;
+                    }
+
+                    // --- SPAWN AMPLITUDE LABEL ---
+                    GameObject ampLabel = Instantiate(peakAmpLabelPrefab, fftGraphPanel.transform, false);
+                    activeLabelPool.Add(ampLabel);
+
+                    TextMeshProUGUI ampText = ampLabel.GetComponent<TextMeshProUGUI>();
+                    if (ampText != null)
+                    {
+                        ampText.text = $"{pressure:F2}";
+                        RectTransform ampRect = ampLabel.GetComponent<RectTransform>();
+                        
+                        // 1. Unified Horizontal Axis Sync Placement Setup Logic
+                        Vector3 localPos = ampRect.localPosition;
+                        localPos.x = targetXCoordinate; // Strictly force X alignment to match the frequency label's coordinate
+                        ampRect.localPosition = localPos;
+
+                        // 2. Re-map ONLY the Y coordinate via anchoredPosition to maintain structural sliding vertical axis functionality
+                        Vector2 currentAnchoredPos = ampRect.anchoredPosition;
+                        currentAnchoredPos.y = peakBarLocalYHeight; 
+                        ampRect.anchoredPosition = currentAnchoredPos;
+                    }
+                }
+            }
+        }
     }
 
     public void ReadSlidersAndRebuildSimulation()
     {
-        // Fallback hooks to handle dynamic context finding if links break
-        if (sliderFrequency == null) { GameObject go = GameObject.Find("Slider_Frequency"); if (go != null) sliderFrequency = go.GetComponent<Slider>(); }
-        if (sliderRMS == null) { GameObject go = GameObject.Find("Slider_RMS"); if (go != null) sliderRMS = go.GetComponent<Slider>(); }
-        if (sliderCount == null) { GameObject go = GameObject.Find("Slider_Count"); if (go != null) sliderCount = go.GetComponent<Slider>(); }
-        if (sliderPower == null) { GameObject go = GameObject.Find("Slider_Power"); if (go != null) sliderPower = go.GetComponent<Slider>(); }
-        if (sliderStep == null) { GameObject go = GameObject.Find("Slider_Step"); if (go != null) sliderStep = go.GetComponent<Slider>(); }
-
-        // Fetch current values
         if (sliderFrequency != null) principalFrequency = sliderFrequency.value;
         if (sliderRMS != null) calculatedRMS = sliderRMS.value;
         if (sliderCount != null) numHarmonics = Mathf.RoundToInt(sliderCount.value);
         if (sliderPower != null) decayPower = sliderPower.value;
         if (sliderStep != null) stepMultiplier = Mathf.RoundToInt(sliderStep.value);
-
-        Debug.Log($"UI Settings Read - Freq: {principalFrequency}Hz, RMS: {calculatedRMS}, Harmonics: {numHarmonics}");
         
+        // Read and dynamically allocate dynamic bin distributions
+        if (sliderFFTResolution != null) UpdateFFTResolution((int)sliderFFTResolution.value);
+
         ConfigureAndStartSimulation();
     }
 
     public void ConfigureAndStartSimulation()
     {
         analysisComplete = false;
-        outMuteFade = 0.0f; // Drop volume instantly to zero so it can smoothly fade back in pop-free
+        outMuteFade = 0.0f; 
         System.Array.Clear(harmonicAmplitudes, 0, harmonicAmplitudes.Length);
 
         harmonicAmplitudes[0] = calculatedRMS;
@@ -181,7 +367,6 @@ public class AdvancedWaveManager : MonoBehaviour
             }
         }
 
-        // Execute procedural layout calculations
         UpdateFivePointColorLegend();
         GenerateDynamicLegendTexture();
 
@@ -192,7 +377,6 @@ public class AdvancedWaveManager : MonoBehaviour
     private void UpdateFivePointColorLegend()
     {
         float halfPeak = peakPressure * 0.5f;
-
         if (textMaxPa != null) textMaxPa.text = $"+{peakPressure:F3} Pa";
         if (textThreeQuartersPa != null) textThreeQuartersPa.text = $"+{halfPeak:F3} Pa";
         if (textMidPa != null) textMidPa.text = "0.000 Pa";
@@ -213,31 +397,19 @@ public class AdvancedWaveManager : MonoBehaviour
         for (int y = 0; y < textureHeight; y++)
         {
             float normalizedY = (float)y / (textureHeight - 1);
-            Color pixelColor;
-
-            if (normalizedY < 0.5f)
-            {
-                float t = normalizedY * 2f; 
-                pixelColor = Color.Lerp(activePalette.lowPressureTrough, activePalette.zeroPressureEquilibrium, t);
-            }
-            else
-            {
-                float t = (normalizedY - 0.5f) * 2f; 
-                pixelColor = Color.Lerp(activePalette.zeroPressureEquilibrium, activePalette.highPressureCrest, t);
-            }
+            Color pixelColor = normalizedY < 0.5f ? 
+                Color.Lerp(activePalette.lowPressureTrough, activePalette.zeroPressureEquilibrium, normalizedY * 2f) : 
+                Color.Lerp(activePalette.zeroPressureEquilibrium, activePalette.highPressureCrest, (normalizedY - 0.5f) * 2f);
 
             gradientTexture.SetPixel(0, y, pixelColor);
         }
-
         gradientTexture.Apply();
 
-        // 1. Check for standard image architectures
         if (singleColorBarGraphic is UnityEngine.UI.Image uiImage)
         {
             uiImage.color = Color.white;
             uiImage.sprite = Sprite.Create(gradientTexture, new Rect(0, 0, 1, textureHeight), new Vector2(0.5f, 0.5f));
         }
-        // 2. Direct texture deployment mapping for Raw Image layouts
         else if (singleColorBarGraphic is UnityEngine.UI.RawImage rawImage)
         {
             rawImage.color = Color.white;
@@ -248,10 +420,7 @@ public class AdvancedWaveManager : MonoBehaviour
     private void UpdateSliderLabel(Slider targetSlider)
     {
         SliderTextBridge bridge = targetSlider.GetComponent<SliderTextBridge>();
-        if (bridge != null)
-        {
-            bridge.UpdateTextValue(targetSlider.value);
-        }
+        if (bridge != null) bridge.UpdateTextValue(targetSlider.value);
     }
 
     void GenerateStaticFourierSlices()
@@ -263,20 +432,17 @@ public class AdvancedWaveManager : MonoBehaviour
 
         float roomFadeMaxDistance = chamberMax.z - chamberMin.z; 
         float baseWavelength = SPEED_OF_SOUND / principalFrequency; 
-        
         float totalWavelengthsInChamber = roomFadeMaxDistance / baseWavelength; 
-        int slicesPerWavelength = 6; 
         
-        int totalSlices = Mathf.CeilToInt(totalWavelengthsInChamber * slicesPerWavelength); 
+        int totalSlices = Mathf.CeilToInt(totalWavelengthsInChamber * 6); 
         if (totalSlices < 2) totalSlices = 2;
 
         float spatialStepDistance = roomFadeMaxDistance / totalSlices;
         MaterialPropertyBlock propBlock = new MaterialPropertyBlock();
-        float sourceOriginSafetyOffset = 0.05f; 
 
         for (int i = 1; i <= totalSlices; i++)
         {
-            float r = (i * spatialStepDistance) + sourceOriginSafetyOffset;
+            float r = (i * spatialStepDistance) + 0.05f;
             Vector3 spawnPosition = transform.position;
 
             float complexAcousticWave = 0f;
@@ -299,34 +465,23 @@ public class AdvancedWaveManager : MonoBehaviour
                 }
             }
 
-            float normalizedPressure = (totalWeights > 0f) ? (complexAcousticWave / totalWeights) : 0f;
-            normalizedPressure = Mathf.Clamp(normalizedPressure, -1f, 1f);
-
+            float normalizedPressure = (totalWeights > 0f) ? Mathf.Clamp(complexAcousticWave / totalWeights, -1f, 1f) : 0f;
             Color combinedAcousticColor = Color.white;
+
             if (totalWeights > 0f)
             {
                 BipolarSpectrumPair palette = harmonicColorPalettes[0]; 
-                if (normalizedPressure >= 0f)
-                {
-                    combinedAcousticColor = Color.Lerp(palette.zeroPressureEquilibrium, palette.highPressureCrest, normalizedPressure);
-                }
-                else
-                {
-                    combinedAcousticColor = Color.Lerp(palette.zeroPressureEquilibrium, palette.lowPressureTrough, Mathf.Abs(normalizedPressure));
-                }
+                combinedAcousticColor = normalizedPressure >= 0f ? 
+                    Color.Lerp(palette.zeroPressureEquilibrium, palette.highPressureCrest, normalizedPressure) : 
+                    Color.Lerp(palette.zeroPressureEquilibrium, palette.lowPressureTrough, Mathf.Abs(normalizedPressure));
             }
 
             float distanceDecay = Mathf.Clamp01(1.0f - (r / roomFadeMaxDistance));
             combinedAcousticColor.a = waveOpacity * distanceDecay;
 
             GameObject frozenWave = Instantiate(wavePrefab, spawnPosition, Quaternion.identity);
-            frozenWave.name = $"Static_Spherical_Shell_{i}_Radius_{r:F2}m_P_{normalizedPressure:F2}";
-            
             frozenWave.transform.localScale = new Vector3(r * 2f, r * 2f, r * 2f);
             ConfigureShaderBoundaries(frozenWave);
-
-            Collider c = frozenWave.GetComponent<Collider>();
-            if (c != null) c.isTrigger = true;
 
             WaveDataIdentifier identifier = frozenWave.AddComponent<WaveDataIdentifier>();
             identifier.waveFrequency = Mathf.RoundToInt(principalFrequency);
@@ -338,13 +493,9 @@ public class AdvancedWaveManager : MonoBehaviour
             {
                 waveRenderer.sharedMaterial.EnableKeyword("_EMISSION");
                 waveRenderer.GetPropertyBlock(propBlock);
-                
                 propBlock.SetColor("_Color", combinedAcousticColor);
                 propBlock.SetColor("_BaseColor", combinedAcousticColor);
-                
-                Color emissionGlow = combinedAcousticColor * maxGlowIntensity * distanceDecay;
-                propBlock.SetColor("_EmissionColor", emissionGlow);
-                
+                propBlock.SetColor("_EmissionColor", combinedAcousticColor * maxGlowIntensity * distanceDecay);
                 waveRenderer.SetPropertyBlock(propBlock);
             }
 
@@ -365,20 +516,12 @@ public class AdvancedWaveManager : MonoBehaviour
             if (targetedWave != null)
             {
                 tooltipPanel.SetActive(true);
-                RectTransform panelRect = tooltipPanel.GetComponent<RectTransform>();
-                if (panelRect != null)
-                {
-                    panelRect.anchorMin = Vector2.zero; panelRect.anchorMax = Vector2.zero; panelRect.pivot = Vector2.zero;
-                }
-
                 tooltipPanel.transform.position = (caveWandPointer != null) ? Camera.main.WorldToScreenPoint(hit.point) : Input.mousePosition + new Vector3(20f, 20f, 0f);
-                float hitRadius = Vector3.Distance(transform.position, hit.point);
-
+                
                 tooltipText.text = $"<b>{targetedWave.harmonicOrder}</b>\n" +
                                    $"Analyzed Principal: {targetedWave.waveFrequency} Hz\n" +
                                    $"Global RMS Weight: {calculatedRMS:F5}\n" +
-                                   $"Global Peak Pressure: {peakPressure:F5}\n" +
-                                   $"Distance From Source: {hitRadius:F2} m";
+                                   $"Distance From Source: {Vector3.Distance(transform.position, hit.point):F2} m";
                 return;
             }
         }
@@ -398,20 +541,11 @@ public class AdvancedWaveManager : MonoBehaviour
         }
     }
 
-    void UpdateUIScreen()
-    {
-        if (uiTextDisplay == null) return;
-        string freqText = analysisComplete ? $"{principalFrequency:F1} Hz" : "Computing Fast Fourier Transform...";
-    }
+    void UpdateUIScreen() { }
 
-    /// <summary>
-    /// Unity DSP Callback Engine: Synthesizes continuous wave samples on the audio thread
-    /// to seamlessly align the physical acoustics with visual configurations.
-    /// </summary>
     void OnAudioFilterRead(float[] data, int channels)
     {
-        // SAFETY GUARD: No longer executing illegal main-thread calls here!
-        if (!analysisComplete || calculatedRMS <= 0.001f || principalFrequency <= 0.1f)
+        if (!analysisComplete || calculatedRMS <= 0.001f || principalFrequency <= 0.1f || harmonicAmplitudes == null)
         {
             System.Array.Clear(data, 0, data.Length);
             return;
@@ -420,12 +554,9 @@ public class AdvancedWaveManager : MonoBehaviour
         for (int i = 0; i < data.Length; i += channels)
         {
             float currentAcousticSampleValue = 0f;
-
-            // 1. Synthesize baseline fundamental tone (Uses the safely cached samplingFrequency variable)
             double fundamentalAngularVelocity = 2.0 * System.Math.PI * principalFrequency / samplingFrequency;
             currentAcousticSampleValue += harmonicAmplitudes[0] * (float)System.Math.Sin(audioPhase);
 
-            // 2. Interleave harmonic overtones dynamically matching slider arrays
             if (numHarmonics > 0)
             {
                 for (int h = 1; h <= numHarmonics; h++)
@@ -449,11 +580,7 @@ public class AdvancedWaveManager : MonoBehaviour
             }
 
             audioPhase += fundamentalAngularVelocity;
-            
-            if (audioPhase > 2.0 * System.Math.PI)
-            {
-                audioPhase %= (2.0 * System.Math.PI);
-            }
+            if (audioPhase > 2.0 * System.Math.PI) audioPhase %= (2.0 * System.Math.PI);
         }
     }
 }
