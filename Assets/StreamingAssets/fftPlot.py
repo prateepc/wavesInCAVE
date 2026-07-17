@@ -12,7 +12,7 @@ import sounddevice as sd
 class AdvancedWavAnalyzerApp:
     def __init__(self, root, initial_file=None):
         self.root = root
-        self.root.title("Real-Time Automated FFT Analyzer (Zero-Popping)")
+        self.root.title("Real-Time Automated FFT Analyzer (Silenced Hardware Thread)")
         self.root.geometry("1100x850")
 
         # Audio Data Variables
@@ -21,7 +21,7 @@ class AdvancedWavAnalyzerApp:
         self.duration = 0.0
         self.is_playing = False
         
-        # Performance Caching and Thread Protection Variables
+        # Performance Tracking Handles
         self.playback_timer_id = None
         self.play_start_time = 0.0
         self.current_analysis_time = 0.0
@@ -194,7 +194,10 @@ class AdvancedWavAnalyzerApp:
         self.play_start_time = time.time()
         self.current_analysis_time = 0.0
         
-        sd.play(self.data, samplerate=self.sample_rate, loop=True)
+        # --- CRITICAL FIX: ASSIGN HARDWARE BLOCKSIZE BUFFER PROTECTION ---
+        # A large blocksize allocation completely separates the audio stream from rendering lag
+        sd.play(self.data, samplerate=self.sample_rate, loop=True, blocksize=4096)
+        
         self.automated_playback_updater()
 
     def stop_audio(self):
@@ -221,11 +224,10 @@ class AdvancedWavAnalyzerApp:
             self.compute_fft_snapshot(target_time=0.0)
 
     def automated_playback_updater(self):
-        """Monitors playback loops efficiently using pre-cached variables to prevent popping clicks."""
+        """Monitors playback loops efficiently using pre-cached variables."""
         if not self.is_playing or self.data is None:
             return
 
-        # Determine elapsed time directly
         elapsed = time.time() - self.play_start_time
         current_file_time = elapsed % self.duration
 
@@ -237,8 +239,8 @@ class AdvancedWavAnalyzerApp:
         if current_file_time < (self.current_analysis_time - self.cached_delta_t):
             self.current_analysis_time = 0.0
 
-        # Run loop at a highly responsive 15ms frame cycle rate
-        self.playback_timer_id = self.root.after(15, self.automated_playback_updater)
+        # Increased checking window slightly to lower CPU thrashing
+        self.playback_timer_id = self.root.after(20, self.automated_playback_updater)
     def compute_fft_snapshot(self, target_time):
         """Extracts the audio slice, evaluates the spectrum, and applies throttled interface drawing."""
         if self.data is None: return
@@ -266,9 +268,9 @@ class AdvancedWavAnalyzerApp:
             fft_vals = np.abs(np.fft.rfft(slice_data))
             fft_freqs = np.fft.rfftfreq(len(slice_data), d=1/self.sample_rate)
 
-            # --- PERFORMANCE FIX: THROTTLE USER INTERFACE LABEL WRITES ---
+            # Throttle UI text adjustments
             current_now = time.time()
-            if (current_now - self.last_pitch_update_time) > 0.20:  # Cap updates to 5 times per second max
+            if (current_now - self.last_pitch_update_time) > 0.25:  # 4 times per second
                 valid_idx = np.where((fft_freqs >= 40) & (fft_freqs <= 5000))
                 if len(valid_idx) > 0 and len(valid_idx[0]) > 0:
                     peak_idx = valid_idx[0][np.argmax(fft_vals[valid_idx])]
@@ -281,7 +283,7 @@ class AdvancedWavAnalyzerApp:
             else:
                 self.ax_fft.set_ylabel("Magnitude (Linear)")
 
-            # Redraw graphs cleanly
+            # Update line plots
             self.line_fft.set_data(fft_freqs, fft_vals)
             self.ax_fft.set_xlim(0, self.slider_freq.get())
             
@@ -298,7 +300,7 @@ class AdvancedWavAnalyzerApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    cmd_file = sys.argv if len(sys.argv) > 1 else None
+    cmd_file = sys.argv[1] if len(sys.argv) > 1 else None
     app = AdvancedWavAnalyzerApp(root, initial_file=cmd_file)
     root.mainloop()
 
