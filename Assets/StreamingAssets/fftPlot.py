@@ -12,8 +12,8 @@ import sounddevice as sd
 class AdvancedWavAnalyzerApp:
     def __init__(self, root, initial_file=None):
         self.root = root
-        self.root.title("Real-Time Automated FFT Analyzer (Auto-Scaling Y-Axis)")
-        self.root.geometry("1100x850")
+        self.root.title("Real-Time Multi-Harmonic Peak & RMS Analyzer")
+        self.root.geometry("1150x880")  # Expanded height slightly for metrics readability
 
         # Audio Data Variables
         self.sample_rate = None
@@ -42,7 +42,7 @@ class AdvancedWavAnalyzerApp:
 
         if initial_file:
             if isinstance(initial_file, list):
-                target_path = initial_file if len(initial_file) > 1 else None
+                target_path = initial_file[1] if len(initial_file) > 1 else None
             else:
                 target_path = initial_file
 
@@ -50,7 +50,7 @@ class AdvancedWavAnalyzerApp:
                 self.root.after(100, lambda: self.load_file_from_path(target_path))
 
     def create_widgets(self):
-        """Creates an expanded control interface."""
+        """Creates an expanded control interface with advanced metrics blocks."""
         control_frame = tk.Frame(self.root)
         control_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
 
@@ -91,8 +91,10 @@ class AdvancedWavAnalyzerApp:
         self.slider_freq.set(22050)
         self.slider_freq.pack(side=tk.LEFT, padx=5)
 
-        self.lbl_pitch = tk.Label(row2, text="Live Pitch: -- Hz", font=("Helvetica", 10, "bold"), fg="darkgreen")
-        self.lbl_pitch.pack(side=tk.LEFT, padx=(20, 5))
+        # Expanded Real-Time Feedback Multi-Line Metric Read-out Card Block
+        self.lbl_pitch = tk.Label(row2, text="Live Dominant & Harmonic Peaks Profile Loading...", 
+                                  font=("Courier", 10, "bold"), fg="darkgreen", justify=tk.LEFT, anchor="w")
+        self.lbl_pitch.pack(side=tk.LEFT, padx=(25, 5), fill=tk.X, expand=True)
 
         self.btn_apply = tk.Button(row2, text="Apply Changes", command=self.apply_ui_changes, bg="lightblue", state=tk.DISABLED)
         self.btn_apply.pack(side=tk.RIGHT, padx=5)
@@ -238,7 +240,7 @@ class AdvancedWavAnalyzerApp:
 
         self.playback_timer_id = self.root.after(20, self.automated_playback_updater)
     def compute_fft_snapshot(self, target_time):
-        """Extracts the audio slice, evaluates the spectrum, and applies auto-scaled Y-limits."""
+        """Extracts the audio slice, calculates multi-harmonic peak-picked RMS spectra, and renders updates."""
         if self.data is None: return
 
         # Sync the green line vector marker coordinate instantly
@@ -261,39 +263,68 @@ class AdvancedWavAnalyzerApp:
             elif win_type == "Blackman" and len(fft_data_slice) > 1: slice_data = fft_data_slice * np.blackman(len(fft_data_slice))
             else: slice_data = fft_data_slice
 
-            fft_vals = np.abs(np.fft.rfft(slice_data))
+            # --- PHYSICAL SCALE CONVERSION MATH ---
+            # To get accurate RMS from real-valued FFT bins, we divide by the total bins and scale by sqrt(2)
+            raw_fft = np.fft.rfft(slice_data)
+            fft_mag_linear = np.abs(raw_fft) / len(slice_data)
+            fft_mag_linear[1:] *= np.sqrt(2) # Account for single-sided folding scaling losses
+            
             fft_freqs = np.fft.rfftfreq(len(slice_data), d=1/self.sample_rate)
 
-            # Throttle UI text adjustments
+            # --- ADVANCED LOGICAL MULTI-PEAK PICKER ---
             current_now = time.time()
-            if (current_now - self.last_pitch_update_time) > 0.25:
-                valid_idx = np.where((fft_freqs >= 40) & (fft_freqs <= 5000))
-                if len(valid_idx) > 0 and len(valid_idx[0]) > 0:
-                    peak_idx = valid_idx[0][np.argmax(fft_vals[valid_idx])]
-                    self.lbl_pitch.config(text="Live Pitch: " + str(round(float(fft_freqs[peak_idx]), 1)) + " Hz")
+            if (current_now - self.last_pitch_update_time) > 0.25:  # Throttle updates to 4 times per second max
+                # Filter down to the structural acoustic musical search window
+                valid_search_mask = (fft_freqs >= 40) & (fft_freqs <= 5000)
+                search_indices = np.where(valid_search_mask)[0]
+
+                peaks_list = []
+                # Step through spectrum with an index radius buffer window to isolate true peaks
+                neighbor_radius = max(2, int(len(fft_freqs) * 0.005))
+                
+                for idx in search_indices:
+                    if idx <= neighbor_radius or idx >= len(fft_freqs) - neighbor_radius:
+                        continue
+                    current_amplitude = fft_mag_linear[idx]
+                    
+                    # Establish if this point is a true local peak relative to its neighbors
+                    local_left_max = np.max(fft_mag_linear[idx - neighbor_radius:idx])
+                    local_right_max = np.max(fft_mag_linear[idx + 1:idx + neighbor_radius + 1])
+                    
+                    if current_amplitude > local_left_max and current_amplitude > local_right_max:
+                        peaks_list.append((current_amplitude, fft_freqs[idx]))
+
+                # Sort distinct peak targets descending by amplitude magnitude
+                peaks_list.sort(key=lambda item: item[0], reverse=True)
+
+                # Construct a clean 4-line readout summary map
+                report_lines = []
+                for label_rank, title_prefix in enumerate(["Dominant", "Peak #2  ", "Peak #3  ", "Peak #4  "]):
+                    if label_rank < len(peaks_list):
+                        amp_rms, freq_hz = peaks_list[label_rank]
+                        # Compute local peak attributes in dB format
+                        amp_db = 20 * np.log10(amp_rms + 1e-8)
+                        report_lines.append(f"{title_prefix}: {freq_hz:6.1f} Hz | RMS: {amp_rms:5.4f} ({amp_db:5.1f} dB)")
+                    else:
+                        report_lines.append(f"{title_prefix}: -- Hz | RMS: --")
+
+                self.lbl_pitch.config(text="\n".join(report_lines))
                 self.last_pitch_update_time = current_now
 
-            # --- DYNAMIC FOCUS Y-AXIS SCALE ENGINE ---
+            # Map scaling flags onto our data display line vectors
             if self.db_scale_var.get():
-                fft_vals = 20 * np.log10(fft_vals + 1e-8)
-                self.ax_fft.set_ylabel("Magnitude (dB)")
-                
-                # Capture current snapshot peak maximum
-                max_db = np.max(fft_vals)
-                
-                # Anchor the window view to look at a clean 65 dB field immediately below the peak
-                y_min = max_db - 65.0
-                y_max = max_db + 5.0
-                self.ax_fft.set_ylim(y_min, y_max)
+                fft_display_vals = 20 * np.log10(fft_mag_linear + 1e-8)
+                self.ax_fft.set_ylabel("RMS Magnitude (dB)")
+                max_db = np.max(fft_display_vals)
+                self.ax_fft.set_ylim(max_db - 65.0, max_db + 5.0)
             else:
-                self.ax_fft.set_ylabel("Magnitude (Linear)")
-                max_lin = np.max(fft_vals)
-                
-                # Keep linear scale anchored to 0 base down to prevent drifting
+                fft_display_vals = fft_mag_linear
+                self.ax_fft.set_ylabel("RMS Magnitude (Linear)")
+                max_lin = np.max(fft_display_vals)
                 self.ax_fft.set_ylim(0.0, max_lin * 1.1 if max_lin > 0 else 1.0)
 
             # Update line plots
-            self.line_fft.set_data(fft_freqs, fft_vals)
+            self.line_fft.set_data(fft_freqs, fft_display_vals)
             self.ax_fft.set_xlim(0, self.slider_freq.get())
 
         self.ax_fft.set_title(f"FFT Window Snapshot at {target_time:.2f}s (Step Δt = {self.cached_delta_t:.2f}s | Mode: {win_type})")
@@ -306,7 +337,7 @@ class AdvancedWavAnalyzerApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    cmd_file = sys.argv if len(sys.argv) > 1 else None
+    cmd_file = sys.argv[1] if len(sys.argv) > 1 else None
     app = AdvancedWavAnalyzerApp(root, initial_file=cmd_file)
     root.mainloop()
 
