@@ -5,7 +5,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.widgets import Slider
 import numpy as np
 import soundfile as sf
 import sounddevice as sd
@@ -13,7 +12,7 @@ import sounddevice as sd
 class AdvancedWavAnalyzerApp:
     def __init__(self, root, initial_file=None):
         self.root = root
-        self.root.title("Advanced WAV Time Series & Dynamic FFT Analyzer")
+        self.root.title("Real-Time Automated FFT Analyzer (Zero-Popping)")
         self.root.geometry("1100x850")
 
         # Audio Data Variables
@@ -21,7 +20,14 @@ class AdvancedWavAnalyzerApp:
         self.data = None
         self.duration = 0.0
         self.is_playing = False
-        self.slider_time = None  
+        
+        # Performance Caching and Thread Protection Variables
+        self.playback_timer_id = None
+        self.play_start_time = 0.0
+        self.current_analysis_time = 0.0
+        self.cached_win_len = 0.1
+        self.cached_delta_t = 1.0
+        self.last_pitch_update_time = 0.0
 
         # UI State Control Variables
         self.fft_window_var = tk.StringVar(value="0.1")
@@ -32,14 +38,11 @@ class AdvancedWavAnalyzerApp:
         self.create_widgets()
         self.setup_plots()
 
-        # Handle window closure cleanup properly
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # --- CRITICAL FIX: ENSURE PATH IS EXTRACTED STRICTLY AS A STRING ---
         if initial_file:
             if isinstance(initial_file, list):
-                # Fallback safeguard if the whole sys.argv list gets passed in
-                target_path = initial_file[1] if len(initial_file) > 1 else None
+                target_path = initial_file if len(initial_file) > 1 else None
             else:
                 target_path = initial_file
 
@@ -61,7 +64,6 @@ class AdvancedWavAnalyzerApp:
         self.lbl_file = tk.Label(row1, text="No file loaded", fg="gray")
         self.lbl_file.pack(side=tk.LEFT, padx=10)
 
-        # Play/Stop Loop Controller Button
         self.btn_play = tk.Button(row1, text="▶ Play (Loop)", command=self.toggle_playback, bg="lightgreen", state=tk.DISABLED)
         self.btn_play.pack(side=tk.LEFT, padx=15)
 
@@ -78,35 +80,41 @@ class AdvancedWavAnalyzerApp:
 
         tk.Label(row2, text="Windowing:").pack(side=tk.LEFT, padx=(15, 5))
         windows = ["None (Rectangular)", "Hann", "Hamming", "Blackman"]
-        self.menu_window = tk.OptionMenu(row2, self.window_func_var, *windows, command=lambda _: self.update_plots())
+        self.menu_window = tk.OptionMenu(row2, self.window_func_var, *windows, command=lambda _: self.apply_ui_changes())
         self.menu_window.pack(side=tk.LEFT, padx=5)
 
-        self.chk_db = tk.Checkbutton(row2, text="Use dB Scale", variable=self.db_scale_var, command=self.update_plots)
+        self.chk_db = tk.Checkbutton(row2, text="Use dB Scale", variable=self.db_scale_var, command=self.apply_ui_changes)
         self.chk_db.pack(side=tk.LEFT, padx=15)
 
         tk.Label(row2, text="Max Freq Zoom (Hz):").pack(side=tk.LEFT, padx=(15, 5))
-        self.slider_freq = tk.Scale(row2, from_=500, to=22050, orient=tk.HORIZONTAL, length=180, command=lambda _: self.update_plots())
+        self.slider_freq = tk.Scale(row2, from_=500, to=22050, orient=tk.HORIZONTAL, length=180, command=lambda _: self.apply_ui_changes())
         self.slider_freq.set(22050)
         self.slider_freq.pack(side=tk.LEFT, padx=5)
 
         self.lbl_pitch = tk.Label(row2, text="Live Pitch: -- Hz", font=("Helvetica", 10, "bold"), fg="darkgreen")
         self.lbl_pitch.pack(side=tk.LEFT, padx=(20, 5))
 
-        self.btn_apply = tk.Button(row2, text="Apply Changes", command=self.update_plots, bg="lightblue", state=tk.DISABLED)
+        self.btn_apply = tk.Button(row2, text="Apply Changes", command=self.apply_ui_changes, bg="lightblue", state=tk.DISABLED)
         self.btn_apply.pack(side=tk.RIGHT, padx=5)
-
     def setup_plots(self):
-        """Initializes Time and FFT plots."""
+        """Initializes Time and FFT plots with padding settings."""
         self.fig, (self.ax_time, self.ax_fft) = plt.subplots(2, 1, figsize=(8, 6))
         self.fig.tight_layout(pad=4.0)
 
         self.ax_time.set_title("Time Series View")
         self.ax_time.grid(True)
-        self.ax_fft.set_title("Frequency Domain (FFT Summary)")
+        self.ax_fft.set_title("Frequency Domain (Live Delta T Step Spectrum)")
         self.ax_fft.grid(True)
+
+        # Plot structural placeholders
+        self.line_time, = self.ax_time.plot([], [], color='royalblue', lw=0.5)
+        self.line_fft, = self.ax_fft.plot([], [], color='crimson', lw=1.2)
+        
+        self.live_time_marker = self.ax_time.axvline(x=0.0, color='darkgreen', linestyle='--', lw=2.0)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
     def browse_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("Audio files", "*.wav;*.mp3")])
         if file_path:
@@ -157,95 +165,99 @@ class AdvancedWavAnalyzerApp:
             self.slider_freq.config(to=nyquist)
             self.slider_freq.set(nyquist if nyquist < 22050 else 22050)
 
-            # Build our timeline slider with axis offsets
-            self.fig.subplots_adjust(bottom=0.15)  
-            ax_slider = self.fig.add_axes([0.15, 0.05, 0.7, 0.03])
-            
-            self.slider_time = Slider(
-                ax=ax_slider, label='FFT Position (s)', 
-                valmin=0.0, valmax=self.duration, valinit=0.0, 
-                valfmt='%1.2fs', color='royalblue'
-            )
-            
-            # --- CRITICAL ANTI-HISS HOOK ENGINE ---
-            # Temporarily pause sounddevice while your mouse is dragging the tracker to stop clipping artifacts
-            self.slider_time.on_changed(self.on_slider_move)
-            self.fig.canvas.mpl_connect('button_release_event', self.on_slider_release)
+            # Draw static waveform line elements once
+            time_vector = np.linspace(0.0, self.duration, num=len(self.data))
+            self.line_time.set_data(time_vector, self.data)
+            self.ax_time.set_xlim(0.0, self.duration)
+            self.ax_time.set_ylim(-1.1, 1.1)
 
-            # Sync Controls
+            # Sync GUI Labels
             self.lbl_file.config(text=os.path.basename(file_path), fg="black")
             self.btn_apply.config(state=tk.NORMAL)
             self.btn_play.config(state=tk.NORMAL)
             self.lbl_page.config(text="Total Duration: " + str(round(self.duration, 2)) + "s")
-            self.update_plots()
+            
+            self.current_analysis_time = 0.0
+            self.apply_ui_changes()
 
         except Exception as e:
             messagebox.showerror("Error", f"Could not decode or sanitize audio file:\n{str(e)}")
-
     def toggle_playback(self):
         if self.is_playing: self.stop_audio()
         else: self.start_audio()
 
-    def start_audio(self, offset_seconds=0.0):
+    def start_audio(self):
         if self.data is None: return
         self.is_playing = True
         self.btn_play.config(text="⏹ Stop Loop", bg="salmon")
         
-        # Calculate sample starting boundaries based on slider offsets
-        start_idx = int(offset_seconds * self.sample_rate)
-        start_idx = min(max(0, start_idx), len(self.data) - 1)
+        self.play_start_time = time.time()
+        self.current_analysis_time = 0.0
         
-        sd.play(self.data[start_idx:], samplerate=self.sample_rate, loop=True)
+        sd.play(self.data, samplerate=self.sample_rate, loop=True)
+        self.automated_playback_updater()
 
     def stop_audio(self):
         self.is_playing = False
         self.btn_play.config(text="▶ Play (Loop)", bg="lightgreen")
         sd.stop()
-    def on_slider_move(self, val):
-        """Mutes audio hardware on your Mac during drag events to eradicate hissing."""
-        if self.is_playing:
-            sd.stop()  
-        self.update_plots(target_time=val)
+        
+        if self.playback_timer_id is not None:
+            self.root.after_cancel(self.playback_timer_id)
+            self.playback_timer_id = None
 
-    def on_slider_release(self, event):
-        """Unmutes audio instantly from your mouse release point."""
-        if self.is_playing and self.slider_time is not None:
-            self.start_audio(offset_seconds=self.slider_time.val)
-
-    def update_plots(self, target_time=0.0):
-        if self.data is None: return
-        time_vector = np.linspace(0.0, self.duration, num=len(self.data))
-
-        # --- Redraw Time Plot ---
-        self.ax_time.clear()
-        self.ax_time.plot(time_vector, self.data, color='royalblue', lw=0.5)
-        self.ax_time.set_xlim(0.0, self.duration + 0.5)
-        self.ax_time.set_title("Full Audio Waveform Profile")
-        self.ax_time.set_xlabel("Time (seconds)")
-        self.ax_time.set_ylabel("Amplitude")
-        self.ax_time.grid(True)
-        self.ax_time.axvline(x=target_time, color='darkgreen', linestyle='--', lw=1.5)
-
-        # --- Compute & Redraw FFT Plot ---
+    def apply_ui_changes(self):
+        """Safely parses and caches interface inputs strictly outside of the performance loop."""
         try:
             win_val = self.fft_window_var.get().strip()
-            fft_win_len = float(win_val) if win_val else 0.1
-            if fft_win_len <= 0: fft_win_len = 0.1
+            self.cached_win_len = float(win_val) if win_val else 0.1
+            if self.cached_win_len <= 0: self.cached_win_len = 0.1
         except ValueError:
-            fft_win_len = 0.1
+            self.cached_win_len = 0.1
+
+        self.cached_delta_t = 10 * self.cached_win_len
+        
+        if not self.is_playing:
+            self.compute_fft_snapshot(target_time=0.0)
+
+    def automated_playback_updater(self):
+        """Monitors playback loops efficiently using pre-cached variables to prevent popping clicks."""
+        if not self.is_playing or self.data is None:
+            return
+
+        # Determine elapsed time directly
+        elapsed = time.time() - self.play_start_time
+        current_file_time = elapsed % self.duration
+
+        # Compute the FFT step snapshot only when crossing a Delta T milestone boundary
+        if current_file_time >= self.current_analysis_time:
+            self.compute_fft_snapshot(target_time=self.current_analysis_time)
+            self.current_analysis_time += self.cached_delta_t
+            
+        if current_file_time < (self.current_analysis_time - self.cached_delta_t):
+            self.current_analysis_time = 0.0
+
+        # Run loop at a highly responsive 15ms frame cycle rate
+        self.playback_timer_id = self.root.after(15, self.automated_playback_updater)
+    def compute_fft_snapshot(self, target_time):
+        """Extracts the audio slice, evaluates the spectrum, and applies throttled interface drawing."""
+        if self.data is None: return
+
+        # Sync the green line vector marker coordinate instantly
+        self.live_time_marker.set_xdata([target_time])
 
         start_sample = int(target_time * self.sample_rate)
-        end_sample = start_sample + int(fft_win_len * self.sample_rate)
-        
+        window_size_samples = int(self.cached_win_len * self.sample_rate)
+        end_sample = start_sample + window_size_samples
+
         if end_sample > len(self.data):
             end_sample = len(self.data)
-            start_sample = max(0, end_sample - int(fft_win_len * self.sample_rate))
+            start_sample = max(0, end_sample - window_size_samples)
 
         fft_data_slice = self.data[start_sample:end_sample].astype(float)
+        win_type = self.window_func_var.get()
 
-        self.ax_fft.clear()
         if len(fft_data_slice) > 10:
-            win_type = self.window_func_var.get()
             if win_type == "Hann" and len(fft_data_slice) > 1: slice_data = fft_data_slice * np.hanning(len(fft_data_slice))
             elif win_type == "Hamming" and len(fft_data_slice) > 1: slice_data = fft_data_slice * np.hamming(len(fft_data_slice))
             elif win_type == "Blackman" and len(fft_data_slice) > 1: slice_data = fft_data_slice * np.blackman(len(fft_data_slice))
@@ -254,11 +266,14 @@ class AdvancedWavAnalyzerApp:
             fft_vals = np.abs(np.fft.rfft(slice_data))
             fft_freqs = np.fft.rfftfreq(len(slice_data), d=1/self.sample_rate)
 
-            # Pitch Tracking Peak Finder
-            valid_idx = np.where((fft_freqs >= 40) & (fft_freqs <= 5000))
-            if len(valid_idx) > 0 and len(valid_idx[0]) > 0:
-                peak_idx = valid_idx[0][np.argmax(fft_vals[valid_idx])]
-                self.lbl_pitch.config(text="Live Pitch: " + str(round(float(fft_freqs[peak_idx]), 1)) + " Hz")
+            # --- PERFORMANCE FIX: THROTTLE USER INTERFACE LABEL WRITES ---
+            current_now = time.time()
+            if (current_now - self.last_pitch_update_time) > 0.20:  # Cap updates to 5 times per second max
+                valid_idx = np.where((fft_freqs >= 40) & (fft_freqs <= 5000))
+                if len(valid_idx) > 0 and len(valid_idx[0]) > 0:
+                    peak_idx = valid_idx[0][np.argmax(fft_vals[valid_idx])]
+                    self.lbl_pitch.config(text="Live Pitch: " + str(round(float(fft_freqs[peak_idx]), 1)) + " Hz")
+                self.last_pitch_update_time = current_now
 
             if self.db_scale_var.get():
                 fft_vals = 20 * np.log10(fft_vals + 1e-8)
@@ -266,12 +281,14 @@ class AdvancedWavAnalyzerApp:
             else:
                 self.ax_fft.set_ylabel("Magnitude (Linear)")
 
-            self.ax_fft.plot(fft_freqs, fft_vals, color='crimson', lw=1.2)
+            # Redraw graphs cleanly
+            self.line_fft.set_data(fft_freqs, fft_vals)
             self.ax_fft.set_xlim(0, self.slider_freq.get())
+            
+            if len(fft_vals) > 0:
+                self.ax_fft.set_ylim(np.min(fft_vals) - 2, np.max(fft_vals) + 5)
 
-        self.ax_fft.set_title("FFT Spectrum Window at " + str(round(target_time, 2)) + "s (" + str(round(fft_win_len, 2)) + "s | Mode: " + win_type + ")")
-        self.ax_fft.set_xlabel("Frequency (Hz)")
-        self.ax_fft.grid(True)
+        self.ax_fft.set_title(f"FFT Window Snapshot at {target_time:.2f}s (Step Δt = {self.cached_delta_t:.2f}s | Mode: {win_type})")
         self.canvas.draw_idle()
 
     def on_closing(self):
@@ -281,8 +298,7 @@ class AdvancedWavAnalyzerApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    # CRITICAL STRING PATH FIX: Extract argument index 1 directly as a clean target path string 
-    cmd_file = sys.argv[1] if len(sys.argv) > 1 else None
+    cmd_file = sys.argv if len(sys.argv) > 1 else None
     app = AdvancedWavAnalyzerApp(root, initial_file=cmd_file)
     root.mainloop()
 
