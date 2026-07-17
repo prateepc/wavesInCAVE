@@ -1,0 +1,28 @@
+# Real-Time Multi-Harmonic Peak & RMS Analyzer
+
+An advanced Python audio analysis application designed to parse real-time acoustic signatures. It extracts high-fidelity frequency information, root-mean-square (RMS) energy configurations, and timbral properties—ideal for driving geometric rendering engines (such as Unity models in a CAVE virtual environment).
+
+## Features
+- **Delta T Spacing Constraint**: Automatically jumps forward by exactly $10 \times \text{window\_size}$ on each iteration.
+- **Advanced Peak Picking**: Uses index-radius buffer filtering to isolate true separate harmonic overtones rather than adjacent bins.
+- **Physical Scale Conversion**: Computes real-world linear RMS values and calibrated decibel ($dB$) responses.
+- **Zero-Popping Stream Separation**: Implements an explicit hardware blocksize buffer strategy ($4096$ frames) to isolate calculations from audio hardware threads.
+- **Dynamic Headroom Focus**: Automatically crops the FFT vertical axis to show a focused $65\text{ dB}$ window directly beneath the absolute peak.
+
+## Acoustic Data Metrics Explained
+
+### Global Metrics
+- **Total Chunk RMS**: The overall amplitude energy of the current time slice. Perfect for driving a global 3D geometric scale or radius modifier.
+- **Timbre Centroid**: The "center of mass" of the frequency spectrum. Represents brightness or dullness; excellent for mapping color shaders or neon/glow states.
+- **Bands RMS (Low / Mid / High)**: Frequency splits breaking at $250\text{ Hz}$ and $2000\text{ Hz}$. Useful for calculating boundary absorption factors inside simulated acoustic spaces like an anechoic chamber.
+
+### Discrete Harmonic Peaks
+- **Dominant Peak**: The primary fundamental frequency ($f_0$) of the note being played.
+- **Peaks #2, #3, & #4**: The three most energetic secondary acoustic harmonics, mathematically filtered to represent true overtones rather than single peak slopes.
+
+## Usage
+Run the application from the command line by optionally passing an audio file path directly:
+```bash
+python fftPlot.py /path/to/your/viola_recording.wav
+```
+
