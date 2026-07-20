@@ -22,7 +22,7 @@ public class AdvancedWaveManager : MonoBehaviour
     public Slider sliderCount;
     public Slider sliderPower;
     public Slider sliderStep;
-    public Slider sliderFFTResolution; // Dynamic bin sizing control layout slider
+    public Slider sliderFFTTimeWindow; // Time-duration window selection slider (0.1s - 2.0s)
     public Button generateButton;
 
     [Header("UI Display Links")]
@@ -59,14 +59,16 @@ public class AdvancedWaveManager : MonoBehaviour
         new BipolarSpectrumPair { lowPressureTrough = new Color(0.2f,0f,0.2f), zeroPressureEquilibrium = Color.white, highPressureCrest = Color.magenta } // 4f
     };
 
-    [Header("Real-Time Graphing System UI links")]
+    [Header("Real-Time Dual-Graphing System UI Links")]
     [Tooltip("The manual toggle control button link.")]
     public Button toggleGraphButton;
-    [Tooltip("The parent object container containing our visual chart nodes.")]
+    [Tooltip("The parent object container containing our visual frequency spectrum chart nodes.")]
     public GameObject fftGraphPanel;
-    [Tooltip("Basic layout node image prefab used for generating spectrum layout nodes.")]
+    [Tooltip("The parent object container containing our visual raw sound wave waveform nodes.")]
+    public GameObject timeGraphPanel; 
+    [Tooltip("Basic layout node prefab (e.g., UI Image or RawImage) used for generating visual bars.")]
     public GameObject graphBarPrefab;
-    [Tooltip("Total vertical multiplier adjusting spectrum display height tracking arrays.")]
+    [Tooltip("Total vertical multiplier adjusting the display scale of both the FFT and raw wave graphs.")]
     public float graphBarHeightScale = 300.0f;
 
     [Header("Multi-Peak Axis Tracking UI Elements")]
@@ -81,7 +83,8 @@ public class AdvancedWaveManager : MonoBehaviour
 
     private AudioSource audioSource;
     private List<GameObject> activeWaves = new List<GameObject>();
-    private List<RectTransform> initializedGraphBars = new List<RectTransform>();
+    private List<RectTransform> initializedFFTBars = new List<RectTransform>();
+    private List<RectTransform> initializedTimeBars = new List<RectTransform>();
     private List<GameObject> activeLabelPool = new List<GameObject>();
     
     // Core analytical variables
@@ -148,17 +151,18 @@ public class AdvancedWaveManager : MonoBehaviour
             toggleGraphButton.onClick.AddListener(ToggleGraphVisibilityState);
         }
 
-       // Initialize Dynamic Power-of-Two FFT Resolution slider metrics
-        if (sliderFFTResolution != null)
+        // Initialize Dynamic Time-Window configuration boundaries
+        if (sliderFFTTimeWindow != null)
         {
-            sliderFFTResolution.minValue = 1; // Minimum changed to 1
-            sliderFFTResolution.maxValue = 7; // Maximum stays 7
-            sliderFFTResolution.wholeNumbers = true;
-            sliderFFTResolution.value = 1;    // Default baseline selection maps to 1024
-            UpdateSliderLabel(sliderFFTResolution);
+            sliderFFTTimeWindow.minValue = 0.10f; // Minimum bounds limit
+            sliderFFTTimeWindow.maxValue = 2.00f; // Upper limit boundary
+            sliderFFTTimeWindow.wholeNumbers = false;
+            sliderFFTTimeWindow.value = 0.10f;    // Balanced default choice matching 44100-48000 standard configurations
+            UpdateSliderLabel(sliderFFTTimeWindow);
         }
-        UpdateFFTResolution(sliderFFTResolution != null ? (int)sliderFFTResolution.value : 1);
-        InitializeFFTGraphVisuals();
+        UpdateFFTTimeWindow(sliderFFTTimeWindow != null ? sliderFFTTimeWindow.value : 0.10f);
+        
+        InitializeDualGraphVisuals();
 
         if (sliderFrequency != null) { sliderFrequency.value = principalFrequency; UpdateSliderLabel(sliderFrequency); }
         if (sliderRMS != null) { sliderRMS.value = calculatedRMS; UpdateSliderLabel(sliderRMS); }
@@ -179,155 +183,195 @@ public class AdvancedWaveManager : MonoBehaviour
         outMuteFade = Mathf.MoveTowards(outMuteFade, 1.0f, Time.deltaTime * 2.0f);
     }
 
-    public void UpdateFFTResolution(int sliderStepValue)
+    public void UpdateFFTTimeWindow(float windowDurationSeconds)
     {
-        // Clamp incoming slider value to the strict 1-7 layout range
-        sliderStepValue = Mathf.Clamp(sliderStepValue, 1, 7);
+        if (samplingFrequency <= 0) samplingFrequency = AudioSettings.outputSampleRate;
 
-        // Linearly map slider values 1 through 7 to exponent values 10 through 12
-        // Step 1 -> 10 (1024)
-        // Step 4 -> 11 (2048)
-        // Step 7 -> 12 (4096)
-        float normalizedStep = (sliderStepValue - 1f) / 6f; // 0.0 to 1.0
-        int targetExponent = Mathf.RoundToInt(Mathf.Lerp(10f, 12f, normalizedStep));
+        // Python concept equivalence mapping equation: target_samples = duration * sample_rate
+        int rawSampleRequirement = Mathf.RoundToInt(windowDurationSeconds * (float)samplingFrequency);
 
-        currentFFTSize = (int)Mathf.Pow(2, targetExponent);
-        currentFFTSize = Mathf.Clamp(currentFFTSize, 1024, 4096);
+        // Unity Safety Snapping: Native built-in arrays strictly require a power of two between 64 and 8192
+        currentFFTSize = Mathf.ClosestPowerOfTwo(rawSampleRequirement);
+        currentFFTSize = Mathf.Clamp(currentFFTSize, 64, 8192);
 
-        // Reallocate internal matrix size arrays securely at runtime
+        // Safely reallocate monitoring metrics buffer spaces instantly
         spectrumDataArray = new float[currentFFTSize];
     }
 
-    private void InitializeFFTGraphVisuals()
+    private void InitializeDualGraphVisuals()
     {
-        if (fftGraphPanel == null || graphBarPrefab == null) return;
-
-        RectTransform panelRect = fftGraphPanel.GetComponent<RectTransform>();
-        if (panelRect == null) return;
+        if (graphBarPrefab == null) return;
 
         int totalVisualBars = 256;
-        float containerWidth = panelRect.rect.width;
-        float individualBarWidth = containerWidth / totalVisualBars;
 
-        for (int i = 0; i < totalVisualBars; i++)
+        // --- GENERATE SPECTRUM FFT NODES ---
+        if (fftGraphPanel != null)
         {
-            GameObject barInstance = Instantiate(graphBarPrefab, fftGraphPanel.transform, false);
-            RectTransform barRect = barInstance.GetComponent<RectTransform>();
-            
-            if (barRect != null)
+            RectTransform fftRect = fftGraphPanel.GetComponent<RectTransform>();
+            if (fftRect != null)
             {
-                barRect.anchorMin = new Vector2(0f, 0f);
-                barRect.anchorMax = new Vector2(0f, 0f);
-                barRect.pivot = new Vector2(0.5f, 0f);
-                
-                barRect.anchoredPosition = new Vector2((i * individualBarWidth) + (individualBarWidth / 2f), 0f);
-                barRect.sizeDelta = new Vector2(individualBarWidth * 0.85f, 0f); 
-                
-                initializedGraphBars.Add(barRect);
+                float barWidth = fftRect.rect.width / totalVisualBars;
+                for (int i = 0; i < totalVisualBars; i++)
+                {
+                    GameObject barInstance = Instantiate(graphBarPrefab, fftGraphPanel.transform, false);
+                    RectTransform barRect = barInstance.GetComponent<RectTransform>();
+                    if (barRect != null)
+                    {
+                        barRect.anchorMin = new Vector2(0f, 0f);
+                        barRect.anchorMax = new Vector2(0f, 0f);
+                        barRect.pivot = new Vector2(0.5f, 0f); // Bottom anchor matching standard spectra charts
+                        barRect.anchoredPosition = new Vector2((i * barWidth) + (barWidth / 2f), 0f);
+                        barRect.sizeDelta = new Vector2(barWidth * 0.85f, 0f);
+                        initializedFFTBars.Add(barRect);
+                    }
+                }
+            }
+        }
+
+        // --- GENERATE WAVEFORM TIME-DOMAIN NODES ---
+        if (timeGraphPanel != null)
+        {
+            RectTransform timeRect = timeGraphPanel.GetComponent<RectTransform>();
+            if (timeRect != null)
+            {
+                float barWidth = timeRect.rect.width / totalVisualBars;
+                for (int i = 0; i < totalVisualBars; i++)
+                {
+                    GameObject barInstance = Instantiate(graphBarPrefab, timeGraphPanel.transform, false);
+                    RectTransform barRect = barInstance.GetComponent<RectTransform>();
+                    if (barRect != null)
+                    {
+                        barRect.anchorMin = new Vector2(0f, 0.5f);
+                        barRect.anchorMax = new Vector2(0f, 0.5f);
+                        barRect.pivot = new Vector2(0.5f, 0.5f); // Midline anchor matching standard oscillo-waves
+                        barRect.anchoredPosition = new Vector2((i * barWidth) + (barWidth / 2f), 0f);
+                        barRect.sizeDelta = new Vector2(barWidth * 0.85f, 0f);
+                        initializedTimeBars.Add(barRect);
+                    }
+                }
             }
         }
     }
 
     public void ToggleGraphVisibilityState()
     {
-        if (fftGraphPanel != null)
-        {
-            fftGraphPanel.SetActive(!fftGraphPanel.activeSelf);
-        }
+        if (fftGraphPanel != null) fftGraphPanel.SetActive(!fftGraphPanel.activeSelf);
+        if (timeGraphPanel != null) timeGraphPanel.SetActive(!timeGraphPanel.activeSelf);
     }
 
     private void UpdateRealTimeFFTGraph()
     {
-        if (fftGraphPanel == null || !fftGraphPanel.activeSelf || audioSource == null || peakFreqLabelPrefab == null || peakAmpLabelPrefab == null || spectrumDataArray == null) return;
+        bool isFFTActive = fftGraphPanel != null && fftGraphPanel.activeSelf;
+        bool isTimeActive = timeGraphPanel != null && timeGraphPanel.activeSelf;
 
-        // 1. Gather dynamic high-resolution spectrum data matrices
-        audioSource.GetSpectrumData(spectrumDataArray, 0, FFTWindow.BlackmanHarris);
+        // Safety check: If neither panel is open, or audio arrays aren't ready, skip processing
+        if ((!isFFTActive && !isTimeActive) || audioSource == null || spectrumDataArray == null) return;
 
-        // Wipe old temporary axis text labels from the previous frame
+        // Wipe old sliding telemetry text labels from the layout
         for (int i = activeLabelPool.Count - 1; i >= 0; i--)
         {
             if (activeLabelPool[i] != null) Destroy(activeLabelPool[i]);
         }
         activeLabelPool.Clear();
 
-        float panelWidth = fftGraphPanel.GetComponent<RectTransform>().rect.width;
-
-        // 2. Map and scale visible display layout bars across dynamic logarithmic frequency maps
-        for (int i = 0; i < initializedGraphBars.Count; i++)
+        // --- PROCESS TIME-DOMAIN WAVEFORM DISPLAY GRAPH ---
+        if (isTimeActive && initializedTimeBars.Count > 0)
         {
-            if (initializedGraphBars[i] == null) continue;
+            // Dynamic Allocation: Match the audio buffer array size exactly to the number of spawned UI bars
+            float[] timeDomainSamples = new float[initializedTimeBars.Count];
+            
+            // Use audioSource instead of AudioListener to protect against the Unity Editor 'Mute Audio' trap
+            audioSource.GetOutputData(timeDomainSamples, 0);
 
-            float normalizedPosition = (float)i / initializedGraphBars.Count;
-            int spectrumIndex = Mathf.FloorToInt(Mathf.Pow(normalizedPosition, 2f) * (currentFFTSize - i));
-            spectrumIndex = Mathf.Clamp(spectrumIndex, 0, currentFFTSize - 1);
-
-            float sampleIntensity = spectrumDataArray[spectrumIndex];
-            float dynamicHeightValue = Mathf.Clamp(sampleIntensity * graphBarHeightScale, 2f, graphBarHeightScale);
-
-            Vector2 alteredDimensions = initializedGraphBars[i].sizeDelta;
-            alteredDimensions.y = Mathf.Lerp(alteredDimensions.y, dynamicHeightValue, Time.deltaTime * 12f);
-            initializedGraphBars[i].sizeDelta = alteredDimensions;
-
-            // 3. Multi-Peak Axis Tracker (Local Maxima evaluation)
-            if (i > 0 && i < initializedGraphBars.Count - 1)
+            for (int i = 0; i < initializedTimeBars.Count; i++)
             {
-                float currentVisualHeight = alteredDimensions.y;
-                float prevHeight = initializedGraphBars[i - 1].sizeDelta.y;
+                if (initializedTimeBars[i] == null) continue;
 
-                float nextHeight = dynamicHeightValue; 
-                if (i + 1 < initializedGraphBars.Count)
+                float sampleWaveAmplitude = timeDomainSamples[i] * (graphBarHeightScale * 0.5f);
+                Vector2 size = initializedTimeBars[i].sizeDelta;
+                
+                // Keeps bars standing at a visible baseline minimum height of 2 units
+                size.y = Mathf.Lerp(size.y, Mathf.Max(Mathf.Abs(sampleWaveAmplitude), 2f), Time.deltaTime * 20f);
+                initializedTimeBars[i].sizeDelta = size;
+            }
+        }
+
+        // --- PROCESS FREQUENCY FFT SPECTRA DISPLAY GRAPH ---
+        if (isFFTActive && initializedFFTBars.Count > 0)
+        {
+            float panelWidth = fftGraphPanel.GetComponent<RectTransform>().rect.width;
+            int totalBars = initializedFFTBars.Count;
+
+            // Pull spectrum directly from the generation component source
+            audioSource.GetSpectrumData(spectrumDataArray, 0, FFTWindow.BlackmanHarris);
+
+            for (int i = 0; i < totalBars; i++)
+            {
+                if (initializedFFTBars[i] == null) continue;
+
+                // Linear index calculation focused directly on the audible musical spectrum (0Hz - 5000Hz)
+                float halfSampleRate = (float)(samplingFrequency / 2.0);
+                float maxViewableFrequency = 5000f; 
+                
+                float targetFrequency = ((float)i / totalBars) * maxViewableFrequency;
+                int spectrumIndex = Mathf.RoundToInt((targetFrequency / halfSampleRate) * currentFFTSize);
+                spectrumIndex = Mathf.Clamp(spectrumIndex, 0, currentFFTSize - 1);
+
+                float sampleIntensity = spectrumDataArray[spectrumIndex];
+                
+                // Linear scale amplification multiplier to bring low-intensity harmonic values into view
+                float dynamicHeightValue = Mathf.Clamp(sampleIntensity * graphBarHeightScale * 3f, 2f, graphBarHeightScale);
+
+                Vector2 alteredDimensions = initializedFFTBars[i].sizeDelta;
+                alteredDimensions.y = Mathf.Lerp(alteredDimensions.y, dynamicHeightValue, Time.deltaTime * 14f);
+                initializedFFTBars[i].sizeDelta = alteredDimensions;
+
+                // --- MULTI-PEAK TRACKER RUNTIME ANALYSIS ---
+                if (i > 0 && i < totalBars - 1 && peakFreqLabelPrefab != null && peakAmpLabelPrefab != null)
                 {
-                    float nextNorm = (float)(i + 1) / initializedGraphBars.Count;
-                    int nextIdx = Mathf.Clamp(Mathf.FloorToInt(Mathf.Pow(nextNorm, 2f) * (currentFFTSize - (i + 1))), 0, currentFFTSize - 1);
-                    nextHeight = Mathf.Clamp(spectrumDataArray[nextIdx] * graphBarHeightScale, 2f, graphBarHeightScale);
-                }
+                    float currentVisualHeight = alteredDimensions.y;
+                    float prevHeight = initializedFFTBars[i - 1].sizeDelta.y;
+                    float nextHeight = initializedFFTBars[i + 1].sizeDelta.y;
 
-                // If sample breaks baseline threshold boundaries and is taller than immediate neighbors
-                if (sampleIntensity > peakDetectionThreshold && currentVisualHeight > prevHeight && currentVisualHeight > nextHeight)
-                {
-                    // Calculate precise coordinate values from the visual layout
-                    float horizontalPercentage = (float)i / (initializedGraphBars.Count - 1);
-                    float targetXCoordinate = (horizontalPercentage * panelWidth) - (panelWidth / 2f);
-                    float peakBarLocalYHeight = alteredDimensions.y;
-
-                    float halfSampleRate = (float)(samplingFrequency / 2.0);
-                    float peakFrequency = spectrumIndex * halfSampleRate / currentFFTSize;
-                    float pressure = sampleIntensity * graphSensitivityMultiplier;
-
-                    // --- SPAWN FREQUENCY LABEL ---
-                    GameObject freqLabel = Instantiate(peakFreqLabelPrefab, fftGraphPanel.transform, false);
-                    activeLabelPool.Add(freqLabel);
-
-                    TextMeshProUGUI freqText = freqLabel.GetComponent<TextMeshProUGUI>();
-                    if (freqText != null)
+                    // Peak evaluation check matching neighbor nodes
+                    if (sampleIntensity > peakDetectionThreshold && currentVisualHeight > prevHeight && currentVisualHeight > nextHeight)
                     {
-                        freqText.text = $"{peakFrequency:F0}";
-                        RectTransform freqRect = freqLabel.GetComponent<RectTransform>();
-                        
-                        Vector3 localPos = freqRect.localPosition;
-                        localPos.x = targetXCoordinate;
-                        freqRect.localPosition = localPos;
-                    }
+                        float horizontalPercentage = (float)i / (totalBars - 1);
+                        float targetXCoordinate = (horizontalPercentage * panelWidth) - (panelWidth / 2f);
+                        float peakBarLocalYHeight = alteredDimensions.y;
 
-                    // --- SPAWN AMPLITUDE LABEL ---
-                    GameObject ampLabel = Instantiate(peakAmpLabelPrefab, fftGraphPanel.transform, false);
-                    activeLabelPool.Add(ampLabel);
+                        float peakFrequency = spectrumIndex * halfSampleRate / currentFFTSize;
+                        float pressure = sampleIntensity * graphSensitivityMultiplier;
 
-                    TextMeshProUGUI ampText = ampLabel.GetComponent<TextMeshProUGUI>();
-                    if (ampText != null)
-                    {
-                        ampText.text = $"{pressure:F2}";
-                        RectTransform ampRect = ampLabel.GetComponent<RectTransform>();
-                        
-                        // 1. Unified Horizontal Axis Sync Placement Setup Logic
-                        Vector3 localPos = ampRect.localPosition;
-                        localPos.x = targetXCoordinate; // Strictly force X alignment to match the frequency label's coordinate
-                        ampRect.localPosition = localPos;
+                        // --- SPAWN FREQUENCY LABEL ---
+                        GameObject freqLabel = Instantiate(peakFreqLabelPrefab, fftGraphPanel.transform, false);
+                        activeLabelPool.Add(freqLabel);
+                        TextMeshProUGUI freqText = freqLabel.GetComponent<TextMeshProUGUI>();
+                        if (freqText != null)
+                        {
+                            freqText.text = $"{peakFrequency:F0} Hz";
+                            RectTransform freqRect = freqLabel.GetComponent<RectTransform>();
+                            Vector3 localPos = freqRect.localPosition;
+                            localPos.x = targetXCoordinate;
+                            freqRect.localPosition = localPos;
+                        }
 
-                        // 2. Re-map ONLY the Y coordinate via anchoredPosition to maintain structural sliding vertical axis functionality
-                        Vector2 currentAnchoredPos = ampRect.anchoredPosition;
-                        currentAnchoredPos.y = peakBarLocalYHeight; 
-                        ampRect.anchoredPosition = currentAnchoredPos;
+                        // --- SPAWN AMPLITUDE LABEL ---
+                        GameObject ampLabel = Instantiate(peakAmpLabelPrefab, fftGraphPanel.transform, false);
+                        activeLabelPool.Add(ampLabel);
+                        TextMeshProUGUI ampText = ampLabel.GetComponent<TextMeshProUGUI>();
+                        if (ampText != null)
+                        {
+                            ampText.text = $"{pressure:F2} Pa";
+                            RectTransform ampRect = ampLabel.GetComponent<RectTransform>();
+                            Vector3 localPos = ampRect.localPosition;
+                            localPos.x = targetXCoordinate; 
+                            ampRect.localPosition = localPos;
+
+                            Vector2 currentAnchoredPos = ampRect.anchoredPosition;
+                            currentAnchoredPos.y = peakBarLocalYHeight; 
+                            ampRect.anchoredPosition = currentAnchoredPos;
+                        }
                     }
                 }
             }
@@ -342,8 +386,8 @@ public class AdvancedWaveManager : MonoBehaviour
         if (sliderPower != null) decayPower = sliderPower.value;
         if (sliderStep != null) stepMultiplier = Mathf.RoundToInt(sliderStep.value);
         
-        // Read and dynamically allocate dynamic bin distributions
-        if (sliderFFTResolution != null) UpdateFFTResolution((int)sliderFFTResolution.value);
+        // Dynamic time context resolution checks
+        if (sliderFFTTimeWindow != null) UpdateFFTTimeWindow(sliderFFTTimeWindow.value);
 
         ConfigureAndStartSimulation();
     }

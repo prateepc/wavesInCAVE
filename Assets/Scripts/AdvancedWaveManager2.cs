@@ -1,6 +1,7 @@
 using System.IO;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 using TMPro;
 
 [RequireComponent(typeof(AudioSource))]
@@ -19,6 +20,10 @@ public class AdvancedWaveManager2 : MonoBehaviour
     public AudioSource audioSource;
     [Tooltip("Increases or decreases wave size in response to the recording's volume.")]
     public float sensitivity = 20.0f; 
+
+    [Header("UI Canvas Configuration Elements")] 
+    public Slider sliderFFTTimeWindow; // Time-duration window selection slider (0.1s - 2.0s)
+    public Button generateButton;
 
     [Header("UI Display Links (Outputs Only)")]
     public TextMeshProUGUI uiTextDisplay;
@@ -49,18 +54,46 @@ public class AdvancedWaveManager2 : MonoBehaviour
         new BipolarSpectrumPair { lowPressureTrough = Color.blue, zeroPressureEquilibrium = Color.white, highPressureCrest = Color.red }
     };
 
+    [Header("Real-Time Dual-Graphing System UI Links")]
+    [Tooltip("The manual toggle control button link.")]
+    public Button toggleGraphButton;
+    [Tooltip("The parent object container containing our visual frequency spectrum chart nodes.")]
+    public GameObject fftGraphPanel;
+    [Tooltip("The parent object container containing our visual raw sound wave waveform nodes.")]
+    public GameObject timeGraphPanel; 
+    [Tooltip("Basic layout node prefab (e.g., UI Image or RawImage) used for generating visual bars.")]
+    public GameObject graphBarPrefab;
+    [Tooltip("Total vertical multiplier adjusting the display scale of both the FFT and raw wave graphs.")]
+    public float graphBarHeightScale = 300.0f;
+
+    [Header("Multi-Peak Axis Tracking UI Elements")]
+    [Tooltip("The prefab used to spawn sliding frequency labels along the X-axis.")]
+    public GameObject peakFreqLabelPrefab;
+    [Tooltip("The prefab used to spawn sliding amplitude labels along the Y-axis.")]
+    public GameObject peakAmpLabelPrefab;
+    [Tooltip("Minimum threshold of energy required to count as an active peak.")]
+    public float peakDetectionThreshold = 0.001f;
+    [Tooltip("A general sensitivity modifier translating raw spectral magnitudes back into printable Pascal pressure layouts.")]
+    public float graphSensitivityMultiplier = 20.0f;
+
     private List<GameObject> activeWaves = new List<GameObject>();
+    private List<RectTransform> initializedFFTBars = new List<RectTransform>();
+    private List<RectTransform> initializedTimeBars = new List<RectTransform>();
+    private List<GameObject> activeLabelPool = new List<GameObject>();
     
     // Core analytical variables driven by real-time audio
     private float calculatedRMS = 0f;
     private float peakPressure = 0f;
+    private float detectedDominantFrequency = 0f;
     private bool analysisComplete = false;
 
     private Vector3 chamberMin = new Vector3(-3.35f, 0.00f, -5.00f);
     private Vector3 chamberMax = new Vector3(3.35f, 6.70f, 5.00f);
     
-    // Real-time audio buffer array (reads 256 physical sound samples)
-    private float[] audioSamples = new float[256];
+    // Dynamic Audio Buffer Matrices
+    private double samplingFrequency = 48000.0;
+    private int currentFFTSize = 1024;
+    private float[] spectrumDataArray;
 
     void Start()
     {
@@ -69,6 +102,9 @@ public class AdvancedWaveManager2 : MonoBehaviour
             audioSource = GetComponent<AudioSource>();
         }
 
+        samplingFrequency = AudioSettings.outputSampleRate;
+        if (samplingFrequency <= 0) samplingFrequency = 48000.0;
+
         if (uiTextDisplay == null)
         {
             GameObject foundUIObject = GameObject.Find("TelemetryDisplay");
@@ -76,52 +112,246 @@ public class AdvancedWaveManager2 : MonoBehaviour
         }
         if (tooltipPanel != null) tooltipPanel.SetActive(false);
 
-        // Pre-build our physical visual shells inside the CAVE room
-        analysisComplete = true;
+        // Map Button Handlers
+        if (generateButton != null) generateButton.onClick.AddListener(ReadSlidersAndRebuildSimulation);
+        if (toggleGraphButton != null) toggleGraphButton.onClick.AddListener(ToggleGraphVisibilityState);
+
+        // Setup Time Window Duration Sliders
+        if (sliderFFTTimeWindow != null)
+        {
+            sliderFFTTimeWindow.minValue = 0.10f;
+            sliderFFTTimeWindow.maxValue = 2.00f;
+            sliderFFTTimeWindow.wholeNumbers = false;
+            sliderFFTTimeWindow.value = 0.10f;
+            UpdateSliderLabel(sliderFFTTimeWindow);
+        }
+        UpdateFFTTimeWindow(sliderFFTTimeWindow != null ? sliderFFTTimeWindow.value : 0.10f);
+
+        // Structural UI Generations
+        InitializeDualGraphVisuals();
         GenerateStaticFourierSlices();
         GenerateDynamicLegendTexture();
+        analysisComplete = true;
     }
 
     void Update()
     {
+        if (!analysisComplete) return;
+
+        samplingFrequency = AudioSettings.outputSampleRate;
+        
         AnalyzeAudioSourceVolume();
+        UpdateRealTimeFFTGraph();
         UpdateVisualShellsWithAudio();
         UpdateFivePointColorLegend();
         UpdateUIScreen();
         HandleWaveInterrogation();
     }
 
-    /// <summary>
-    /// Reads raw output amplitude directly from the AudioSource playing the WAV file.
-    /// </summary>
+    public void UpdateFFTTimeWindow(float windowDurationSeconds)
+    {
+        if (samplingFrequency <= 0) samplingFrequency = AudioSettings.outputSampleRate;
+        int rawSampleRequirement = Mathf.RoundToInt(windowDurationSeconds * (float)samplingFrequency);
+
+        currentFFTSize = Mathf.ClosestPowerOfTwo(rawSampleRequirement);
+        currentFFTSize = Mathf.Clamp(currentFFTSize, 64, 8192);
+
+        spectrumDataArray = new float[currentFFTSize];
+    }
+
+    private void InitializeDualGraphVisuals()
+    {
+        if (graphBarPrefab == null) return;
+        int totalVisualBars = 256;
+
+        // FFT Frequency Bars Generation
+        if (fftGraphPanel != null)
+        {
+            RectTransform fftRect = fftGraphPanel.GetComponent<RectTransform>();
+            if (fftRect != null)
+            {
+                float barWidth = fftRect.rect.width / totalVisualBars;
+                for (int i = 0; i < totalVisualBars; i++)
+                {
+                    GameObject barInstance = Instantiate(graphBarPrefab, fftGraphPanel.transform, false);
+                    RectTransform barRect = barInstance.GetComponent<RectTransform>();
+                    if (barRect != null)
+                    {
+                        barRect.anchorMin = new Vector2(0f, 0f);
+                        barRect.anchorMax = new Vector2(0f, 0f);
+                        barRect.pivot = new Vector2(0.5f, 0f);
+                        barRect.anchoredPosition = new Vector2((i * barWidth) + (barWidth / 2f), 0f);
+                        barRect.sizeDelta = new Vector2(barWidth * 0.85f, 0f);
+                        initializedFFTBars.Add(barRect);
+                    }
+                }
+            }
+        }
+
+        // Waveform Time-Domain Bars Generation
+        if (timeGraphPanel != null)
+        {
+            RectTransform timeRect = timeGraphPanel.GetComponent<RectTransform>();
+            if (timeRect != null)
+            {
+                float barWidth = timeRect.rect.width / totalVisualBars;
+                for (int i = 0; i < totalVisualBars; i++)
+                {
+                    GameObject barInstance = Instantiate(graphBarPrefab, timeGraphPanel.transform, false);
+                    RectTransform barRect = barInstance.GetComponent<RectTransform>();
+                    if (barRect != null)
+                    {
+                        barRect.anchorMin = new Vector2(0f, 0.5f);
+                        barRect.anchorMax = new Vector2(0f, 0.5f);
+                        barRect.pivot = new Vector2(0.5f, 0.5f);
+                        barRect.anchoredPosition = new Vector2((i * barWidth) + (barWidth / 2f), 0f);
+                        barRect.sizeDelta = new Vector2(barWidth * 0.85f, 0f);
+                        initializedTimeBars.Add(barRect);
+                    }
+                }
+            }
+        }
+    }
+
+    public void ToggleGraphVisibilityState()
+    {
+        if (fftGraphPanel != null) fftGraphPanel.SetActive(!fftGraphPanel.activeSelf);
+        if (timeGraphPanel != null) timeGraphPanel.SetActive(!timeGraphPanel.activeSelf);
+    }
+
+    public void ReadSlidersAndRebuildSimulation()
+    {
+        if (sliderFFTTimeWindow != null) UpdateFFTTimeWindow(sliderFFTTimeWindow.value);
+    }
+
     void AnalyzeAudioSourceVolume()
     {
         if (audioSource != null && audioSource.isPlaying)
         {
-            // 1. Grab current sound wave sample values
-            audioSource.GetOutputData(audioSamples, 0);
+            float[] localOutputSamples = new float[256];
+            audioSource.GetOutputData(localOutputSamples, 0);
 
-            // 2. Perform RMS (Root Mean Square) calculation to determine physical average amplitude
             float sumOfSquares = 0f;
-            for (int i = 0; i < audioSamples.Length; i++)
+            for (int i = 0; i < localOutputSamples.Length; i++)
             {
-                sumOfSquares += audioSamples[i] * audioSamples[i];
+                sumOfSquares += localOutputSamples[i] * localOutputSamples[i];
             }
             
-            calculatedRMS = Mathf.Sqrt(sumOfSquares / audioSamples.Length) * sensitivity;
+            calculatedRMS = Mathf.Sqrt(sumOfSquares / localOutputSamples.Length) * sensitivity;
             peakPressure = calculatedRMS * 1.414f; 
         }
         else
         {
-            // If audio stops or is paused, decay back down to equilibrium
             calculatedRMS = Mathf.MoveTowards(calculatedRMS, 0f, Time.deltaTime * 2.0f);
             peakPressure = Mathf.MoveTowards(peakPressure, 0f, Time.deltaTime * 2.0f);
         }
     }
 
-    /// <summary>
-    /// Animates the visual shell colors, glow, and heights dynamically based on audio volume.
-    /// </summary>
+    private void UpdateRealTimeFFTGraph()
+    {
+        bool isFFTActive = fftGraphPanel != null && fftGraphPanel.activeSelf;
+        bool isTimeActive = timeGraphPanel != null && timeGraphPanel.activeSelf;
+
+        if ((!isFFTActive && !isTimeActive) || audioSource == null || spectrumDataArray == null) return;
+
+        for (int i = activeLabelPool.Count - 1; i >= 0; i--)
+        {
+            if (activeLabelPool[i] != null) Destroy(activeLabelPool[i]);
+        }
+        activeLabelPool.Clear();
+
+        // Waveform Time Graph Update Processing Loop
+        if (isTimeActive && initializedTimeBars.Count > 0)
+        {
+            float[] timeDomainSamples = new float[initializedTimeBars.Count];
+            audioSource.GetOutputData(timeDomainSamples, 0);
+
+            for (int i = 0; i < initializedTimeBars.Count; i++)
+            {
+                if (initializedTimeBars[i] == null) continue;
+                float sampleWaveAmplitude = timeDomainSamples[i] * (graphBarHeightScale * 0.5f);
+                Vector2 size = initializedTimeBars[i].sizeDelta;
+                size.y = Mathf.Lerp(size.y, Mathf.Max(Mathf.Abs(sampleWaveAmplitude), 2f), Time.deltaTime * 20f);
+                initializedTimeBars[i].sizeDelta = size;
+            }
+        }
+
+        // Spectral FFT Frequency Graph Update Processing Loop
+        if (isFFTActive && initializedFFTBars.Count > 0)
+        {
+            float panelWidth = fftGraphPanel.GetComponent<RectTransform>().rect.width;
+            int totalBars = initializedFFTBars.Count;
+
+            audioSource.GetSpectrumData(spectrumDataArray, 0, FFTWindow.BlackmanHarris);
+
+            float highestIntensitySeen = 0f;
+            float halfSampleRate = (float)(samplingFrequency / 2.0);
+            float maxViewableFrequency = 5000f;
+
+            for (int i = 0; i < totalBars; i++)
+            {
+                if (initializedFFTBars[i] == null) continue;
+
+                float targetFrequency = ((float)i / totalBars) * maxViewableFrequency;
+                int spectrumIndex = Mathf.RoundToInt((targetFrequency / halfSampleRate) * currentFFTSize);
+                spectrumIndex = Mathf.Clamp(spectrumIndex, 0, currentFFTSize - 1);
+
+                float sampleIntensity = spectrumDataArray[spectrumIndex];
+                float dynamicHeightValue = Mathf.Clamp(sampleIntensity * graphBarHeightScale * 3f, 2f, graphBarHeightScale);
+
+                Vector2 alteredDimensions = initializedFFTBars[i].sizeDelta;
+                alteredDimensions.y = Mathf.Lerp(alteredDimensions.y, dynamicHeightValue, Time.deltaTime * 14f);
+                initializedFFTBars[i].sizeDelta = alteredDimensions;
+
+                // Tracks peak real-time frequency analysis elements inside the asset layer
+                if (sampleIntensity > highestIntensitySeen)
+                {
+                    highestIntensitySeen = sampleIntensity;
+                    detectedDominantFrequency = spectrumIndex * halfSampleRate / currentFFTSize;
+                }
+
+                // Peak Axis Telemetry Generation Pass
+                if (i > 0 && i < totalBars - 1 && peakFreqLabelPrefab != null && peakAmpLabelPrefab != null)
+                {
+                    float currentVisualHeight = alteredDimensions.y;
+                    float prevHeight = initializedFFTBars[i - 1].sizeDelta.y;
+                    float nextHeight = initializedFFTBars[i + 1].sizeDelta.y;
+
+                    if (sampleIntensity > peakDetectionThreshold && currentVisualHeight > prevHeight && currentVisualHeight > nextHeight)
+                    {
+                        float horizontalPercentage = (float)i / (totalBars - 1);
+                        float targetXCoordinate = (horizontalPercentage * panelWidth) - (panelWidth / 2f);
+                        float peakBarLocalYHeight = alteredDimensions.y;
+
+                        float peakFrequency = spectrumIndex * halfSampleRate / currentFFTSize;
+                        float pressure = sampleIntensity * graphSensitivityMultiplier;
+
+                        GameObject freqLabel = Instantiate(peakFreqLabelPrefab, fftGraphPanel.transform, false);
+                        activeLabelPool.Add(freqLabel);
+                        TextMeshProUGUI freqText = freqLabel.GetComponent<TextMeshProUGUI>();
+                        if (freqText != null)
+                        {
+                            freqText.text = $"{peakFrequency:F0} Hz";
+                            RectTransform freqRect = freqLabel.GetComponent<RectTransform>();
+                            freqRect.localPosition = new Vector3(targetXCoordinate, freqRect.localPosition.y, 0f);
+                        }
+
+                        GameObject ampLabel = Instantiate(peakAmpLabelPrefab, fftGraphPanel.transform, false);
+                        activeLabelPool.Add(ampLabel);
+                        TextMeshProUGUI ampText = ampLabel.GetComponent<TextMeshProUGUI>();
+                        if (ampText != null)
+                        {
+                            ampText.text = $"{pressure:F2} Pa";
+                            RectTransform ampRect = ampLabel.GetComponent<RectTransform>();
+                            ampRect.localPosition = new Vector3(targetXCoordinate, ampRect.localPosition.y, 0f);
+                            ampRect.anchoredPosition = new Vector2(ampRect.anchoredPosition.x, peakBarLocalYHeight);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     void UpdateVisualShellsWithAudio()
     {
         float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
@@ -135,7 +365,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
             float r = (wave.transform.localScale.x) / 2f; 
             float distanceDecay = Mathf.Clamp01(1.0f - (r / roomFadeMaxDistance));
 
-            // Generate physical oscillations using real-time calculated RMS
             float waveValue = Mathf.Sin(Time.time * 5.0f - r) * calculatedRMS;
             float normalizedPressure = Mathf.Clamp(waveValue, -1f, 1f);
 
@@ -153,25 +382,21 @@ public class AdvancedWaveManager2 : MonoBehaviour
 
             dynamicColor.a = waveOpacity * distanceDecay;
 
-            // Update identifying fields for the hover system
             WaveDataIdentifier identifier = wave.GetComponent<WaveDataIdentifier>();
             if (identifier != null)
             {
+                identifier.waveFrequency = Mathf.RoundToInt(detectedDominantFrequency);
                 identifier.harmonicOrder = normalizedPressure > 0.05f ? "Fourier Compression Zone (High Pressure Crest)" :
                                            normalizedPressure < -0.05f ? "Fourier Rarefaction Zone (Low Pressure Trough)" : "Acoustic Equilibrium Node (Zero Pressure)";
             }
 
-            // Apply calculated color and emissions properties dynamically to Renderer
             Renderer waveRenderer = wave.GetComponent<Renderer>();
             if (waveRenderer != null)
             {
                 waveRenderer.GetPropertyBlock(propBlock);
                 propBlock.SetColor("_Color", dynamicColor);
                 propBlock.SetColor("_BaseColor", dynamicColor);
-                
-                Color emissionGlow = dynamicColor * maxGlowIntensity * distanceDecay;
-                propBlock.SetColor("_EmissionColor", emissionGlow);
-                
+                propBlock.SetColor("_EmissionColor", dynamicColor * maxGlowIntensity * distanceDecay);
                 waveRenderer.SetPropertyBlock(propBlock);
             }
         }
@@ -185,7 +410,7 @@ public class AdvancedWaveManager2 : MonoBehaviour
         if (wavePrefab == null) return;
 
         float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
-        int totalSlices = 24; // Static visual slice count across the CAVE area
+        int totalSlices = 24; 
         float spatialStepDistance = roomFadeMaxDistance / totalSlices;
         float sourceOriginSafetyOffset = 0.05f;
 
@@ -203,9 +428,7 @@ public class AdvancedWaveManager2 : MonoBehaviour
             Collider c = frozenWave.GetComponent<Collider>();
             if (c != null) c.isTrigger = true;
 
-            WaveDataIdentifier identifier = frozenWave.AddComponent<WaveDataIdentifier>();
-            identifier.waveFrequency = 0; // Determined dynamically by the playing audio track later
-
+            frozenWave.AddComponent<WaveDataIdentifier>();
             activeWaves.Add(frozenWave);
         }
     }
@@ -213,7 +436,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
     private void UpdateFivePointColorLegend()
     {
         float halfPeak = peakPressure * 0.5f;
-
         if (textMaxPa != null) textMaxPa.text = $"+{peakPressure:F3} Pa";
         if (textThreeQuartersPa != null) textThreeQuartersPa.text = $"+{halfPeak:F3} Pa";
         if (textMidPa != null) textMidPa.text = "0.000 Pa";
@@ -234,22 +456,12 @@ public class AdvancedWaveManager2 : MonoBehaviour
         for (int y = 0; y < textureHeight; y++)
         {
             float normalizedY = (float)y / (textureHeight - 1);
-            Color pixelColor;
-
-            if (normalizedY < 0.5f)
-            {
-                float t = normalizedY * 2f; 
-                pixelColor = Color.Lerp(activePalette.lowPressureTrough, activePalette.zeroPressureEquilibrium, t);
-            }
-            else
-            {
-                float t = (normalizedY - 0.5f) * 2f; 
-                pixelColor = Color.Lerp(activePalette.zeroPressureEquilibrium, activePalette.highPressureCrest, t);
-            }
+            Color pixelColor = normalizedY < 0.5f ? 
+                Color.Lerp(activePalette.lowPressureTrough, activePalette.zeroPressureEquilibrium, normalizedY * 2f) : 
+                Color.Lerp(activePalette.zeroPressureEquilibrium, activePalette.highPressureCrest, (normalizedY - 0.5f) * 2f);
 
             gradientTexture.SetPixel(0, y, pixelColor);
         }
-
         gradientTexture.Apply();
 
         if (singleColorBarGraphic is UnityEngine.UI.Image uiImage)
@@ -262,6 +474,12 @@ public class AdvancedWaveManager2 : MonoBehaviour
             rawImage.color = Color.white;
             rawImage.texture = gradientTexture;
         }
+    }
+
+    private void UpdateSliderLabel(Slider targetSlider)
+    {
+        SliderTextBridge bridge = targetSlider.GetComponent<SliderTextBridge>();
+        if (bridge != null) bridge.UpdateTextValue(targetSlider.value);
     }
 
     void HandleWaveInterrogation()
@@ -277,17 +495,12 @@ public class AdvancedWaveManager2 : MonoBehaviour
             if (targetedWave != null)
             {
                 tooltipPanel.SetActive(true);
-                RectTransform panelRect = tooltipPanel.GetComponent<RectTransform>();
-                if (panelRect != null)
-                {
-                    panelRect.anchorMin = Vector2.zero; panelRect.anchorMax = Vector2.zero; panelRect.pivot = Vector2.zero;
-                }
-
                 tooltipPanel.transform.position = (caveWandPointer != null) ? Camera.main.WorldToScreenPoint(hit.point) : Input.mousePosition + new Vector3(20f, 20f, 0f);
                 float hitRadius = Vector3.Distance(transform.position, hit.point);
 
                 tooltipText.text = $"<b>{targetedWave.harmonicOrder}</b>\n" +
                                    $"Current Selected File: {(audioSource != null && audioSource.clip != null ? audioSource.clip.name : "None")}\n" +
+                                   $"Track Dominant Peak: {targetedWave.waveFrequency} Hz\n" +
                                    $"Real-time RMS Level: {calculatedRMS:F5}\n" +
                                    $"Calculated Peak Pressure: {peakPressure:F5}\n" +
                                    $"Distance From Source: {hitRadius:F2} m";
@@ -319,6 +532,7 @@ public class AdvancedWaveManager2 : MonoBehaviour
             uiTextDisplay.text = $"<b>ACTIVE RECORDING SIMULATION</b>\n" +
                                  $"File Name: {audioSource.clip.name}\n" +
                                  $"Sampler Frequency: {audioSource.clip.frequency} Hz\n" +
+                                 $"Dominant Tone Peak: {detectedDominantFrequency:F0} Hz\n" +
                                  $"RMS Amplitude: {calculatedRMS:F4} Pa";
         }
         else
