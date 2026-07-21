@@ -1,8 +1,8 @@
 using UnityEngine;
 using UnityEngine.UI;
 using System.IO;
-using System.Collections; // Required for Coroutines (IEnumerator)
-using UnityEngine.Networking; // Required for Web Requests
+using System.Collections;
+using UnityEngine.Networking;
 using TMPro;
 
 public class AudioFileScanner : MonoBehaviour
@@ -12,13 +12,20 @@ public class AudioFileScanner : MonoBehaviour
     public string folderPath; 
 
     [Header("UI References")]
+    public TextMeshProUGUI uiTextDisplay;
+    [Tooltip("Prefab instantiated inside the ScrollView Content container for each found WAV file.")]
     public GameObject buttonPrefab;   
+    [Tooltip("The Content Transform inside the ScrollView Viewport.")]
     public Transform contentContainer; 
-    public GameObject fileSelectorPanel; // Drag your Panel_FileSelector here
-    public GameObject simulationContent; // Drag your simulation manager/mesh here
+    [Tooltip("Drag your Panel_FileSelector here so it can be hidden upon file selection.")]
+    public GameObject fileSelectorPanel; 
+    [Tooltip("Drag your simulation manager/3D container here so it can be revealed upon file selection.")]
+    public GameObject simulationContent; 
 
     [Header("Audio Setup")]
-    public AudioSource simulationAudioSource; // Drag your simulation's AudioSource here
+    [Tooltip("Drag your CAVE Simulation speaker AudioSource here.")]
+    public AudioSource simulationAudioSource; 
+    
 
     void Awake()
     {
@@ -43,121 +50,164 @@ public class AudioFileScanner : MonoBehaviour
         RefreshFileList();
     }
 
+    /// <summary>
+    /// Scans the target folder for .wav files and populates the UI list.
+    /// </summary>
     public void RefreshFileList()
     {
+        if (contentContainer == null)
+        {
+            Debug.LogError("[AudioFileScanner] CRITICAL: 'Content Container' is missing in the Inspector!");
+            return;
+        }
+
+        // Clean out existing UI button elements inside the scroll list
         foreach (Transform child in contentContainer)
         {
             Destroy(child.gameObject);
         }
 
+        // Ensure directory exists
         if (!Directory.Exists(folderPath))
         {
             Directory.CreateDirectory(folderPath);
+            Debug.Log($"[AudioFileScanner] Created directory at path: {folderPath}");
         }
 
         string[] audioFiles = Directory.GetFiles(folderPath, "*.wav");
 
+        if (audioFiles.Length == 0)
+        {
+            Debug.LogWarning($"[AudioFileScanner] No .wav files found in directory: {folderPath}");
+            return;
+        }
+
         foreach (string filePath in audioFiles)
         {
+            if (buttonPrefab == null)
+            {
+                Debug.LogError("[AudioFileScanner] CRITICAL: 'Button Prefab' is missing in the Inspector!");
+                break;
+            }
+
             string fileName = Path.GetFileName(filePath);
             GameObject newButton = Instantiate(buttonPrefab, contentContainer);
-            newButton.GetComponentInChildren<TextMeshProUGUI>().text = fileName;
-
-            Button btnComponent = newButton.GetComponent<Button>();
             
-            // Set up click action to load and play this specific file
-            btnComponent.onClick.AddListener(() => LoadAudioIntoSimulation(filePath));
+            // Assign button text label
+            TextMeshProUGUI label = newButton.GetComponentInChildren<TextMeshProUGUI>();
+            if (label != null)
+            {
+                label.text = fileName;
+            }
+
+            // Ensure button scale/position resets nicely inside layout groups
+            RectTransform rect = newButton.GetComponent<RectTransform>();
+            if (rect != null)
+            {
+                rect.localScale = Vector3.one;
+                Vector3 pos = rect.localPosition;
+                pos.z = 0f;
+                rect.localPosition = pos;
+            }
+
+            // Attach dynamic click event to initiate loading on button tap
+            Button btnComponent = newButton.GetComponent<Button>();
+            if (btnComponent != null)
+            {
+                string capturedPath = filePath; // Capture local variable for lambda delegate
+                btnComponent.onClick.AddListener(() => LoadAudioIntoSimulation(capturedPath));
+            }
         }
     }
 
-    // This triggers the asynchronous loading process
     void LoadAudioIntoSimulation(string selectedFilePath)
     {
+        Debug.Log($"[AudioFileScanner] File selection triggered: {selectedFilePath}");
         StartCoroutine(LoadAudioClipCoroutine(selectedFilePath));
     }
 
-    // Coroutine that runs in the background to load the audio without freezing your screen
+    /// <summary>
+    /// Asynchronously streams and decodes local WAV audio data off the disk without stalling CAVE frame rates.
+    /// </summary>
     IEnumerator LoadAudioClipCoroutine(string absolutePath)
     {
-        // Formulate a robust macOS-friendly URI path (file:///...)
-        string uriPath;
-        #if UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX
-            uriPath = "file://" + absolutePath; 
-            if (!uriPath.StartsWith("file:///"))
-            {
-                uriPath = uriPath.Replace("file://", "file:///");
-            }
-        #else
-            uriPath = "file:///" + absolutePath;
-        #endif
+        System.Uri fileUri = new System.Uri(absolutePath);
+        string uriPath = fileUri.AbsoluteUri;
 
-        // Clean up spaces/special characters in the path string
-        uriPath = System.Uri.EscapeUriString(uriPath);
+        // Show loading status on the Telemetry Display immediately upon click
+        if (uiTextDisplay != null) 
+        {
+            uiTextDisplay.text = $"<b>LOADING AUDIO...</b>\nFile: {Path.GetFileName(absolutePath)}";
+        }
 
-        Debug.Log("[Acoustic Diagnostics] Attempting to fetch audio from: " + uriPath);
-
-        // Send request to load the audio clip as a WAV file
         using (UnityWebRequest uwr = UnityWebRequestMultimedia.GetAudioClip(uriPath, AudioType.WAV))
         {
             yield return uwr.SendWebRequest();
 
             if (uwr.result == UnityWebRequest.Result.ConnectionError || uwr.result == UnityWebRequest.Result.ProtocolError)
             {
-                Debug.LogError("[Acoustic Diagnostics] Web Request Error: " + uwr.error);
+                UpdateScreenDiagnostic($"<b>LOAD ERROR:</b>\n{uwr.error}\nURI: {uriPath}");
             }
             else
             {
-                // Extract the downloaded AudioClip
                 AudioClip loadedClip = DownloadHandlerAudioClip.GetContent(uwr);
-                
+
                 if (loadedClip == null)
                 {
-                    Debug.LogError("[Acoustic Diagnostics] CRITICAL: Downloaded AudioClip reference is NULL!");
+                    UpdateScreenDiagnostic("<b>ERROR:</b> Downloaded AudioClip is NULL!");
+                }
+                else if (loadedClip.samples == 0)
+                {
+                    UpdateScreenDiagnostic($"<b>ERROR: 0 SAMPLES DECODED!</b>\nFile: {loadedClip.name}\nCheck WAV encoding (Must be 16-bit PCM).");
                 }
                 else
                 {
-                    loadedClip.name = Path.GetFileName(absolutePath);
-
-                    // --- STEP 4 AUDIO FILE FORMAT VALIDATION ---
-                    Debug.Log($"[Acoustic Diagnostics] --- CLIP VERIFICATION ---");
-                    Debug.Log($"Name: {loadedClip.name}");
-                    Debug.Log($"Load State: {loadedClip.loadState}"); 
-                    Debug.Log($"Channels: {loadedClip.channels}");
-                    Debug.Log($"Frequency: {loadedClip.frequency} Hz");
-                    Debug.Log($"Length: {loadedClip.length:F2} seconds");
-                    Debug.Log($"Samples Count: {loadedClip.samples}");
-                    Debug.Log($"----------------------------------------");
-
-                    if (loadedClip.samples == 0)
-                    {
-                        Debug.LogError("[Acoustic Diagnostics] FAIL: The file was successfully retrieved, but it contains 0 audio samples. Unity failed to decode this WAV format! Your WAV encoding may be unsupported.");
-                    }
-
-                    // Assign the clip to your visualizer's AudioSource and play it
                     if (simulationAudioSource != null)
                     {
+                        simulationAudioSource.volume = 1.0f;
+                        simulationAudioSource.mute = false;
                         simulationAudioSource.clip = loadedClip;
-                        // Inside LoadAudioClipCoroutine, right before simulationAudioSource.Play();
-                        loadedClip.LoadAudioData(); // Force immediate decompression
+
+                        loadedClip.LoadAudioData(); 
                         simulationAudioSource.Play();
-                        
-                        // Run active playback check on the next frame
-                        StartCoroutine(VerifyPlaybackCoroutine(simulationAudioSource));
 
                         TransitionToSimulation();
                     }
                     else
                     {
-                        Debug.LogError("[Acoustic Diagnostics] FAIL: Missing an assigned AudioSource component in the Inspector!");
+                        UpdateScreenDiagnostic("<b>ERROR:</b> AudioSource missing on Scanner!");
                     }
                 }
             }
         }
     }
 
+    // Helper function to print diagnostics to your screen canvas
+    private void UpdateScreenDiagnostic(string message)
+    {
+        // 1. Keep or re-enable the file panel so you can read the error in the CAVE
+        if (fileSelectorPanel != null) fileSelectorPanel.SetActive(true); 
+
+        // 2. Print error directly onto your TelemetryDisplay UI
+        if (uiTextDisplay != null)
+        {
+            uiTextDisplay.text = message;
+        }
+        else
+        {
+            // Fallback: try finding it automatically if unassigned
+            GameObject foundUIObject = GameObject.Find("TelemetryDisplay");
+            if (foundUIObject != null)
+            {
+                TextMeshProUGUI textComp = foundUIObject.GetComponent<TextMeshProUGUI>();
+                if (textComp != null) textComp.text = message;
+            }
+        }
+    }
+
     IEnumerator VerifyPlaybackCoroutine(AudioSource source)
     {
-        yield return null; // Wait 1 frame for AudioSource.Play() to register on the main thread
+        yield return null; // Wait 1 frame for audio playback initialization
 
         Debug.Log($"[Acoustic Diagnostics] --- SPEAKER STATE CHECK ---");
         Debug.Log($"Speaker Clip Assigned: {(source.clip != null ? source.clip.name : "NULL!")}");
@@ -168,18 +218,32 @@ public class AudioFileScanner : MonoBehaviour
         
         if (source.clip != null && source.isPlaying)
         {
-            Debug.Log("[Acoustic Diagnostics] SUCCESS! Audio is decoded, loaded, and actively playing!");
+            Debug.Log("[Acoustic Diagnostics] SUCCESS! Audio is playing and sending signals to simulation.");
         }
         else if (!source.isPlaying)
         {
-            Debug.LogError("[Acoustic Diagnostics] FAIL: AudioSource is NOT playing! Check if the Speaker GameObject itself or its parent is being deactivated during the panel transition.");
+            Debug.LogError("[Acoustic Diagnostics] FAIL: AudioSource is NOT playing! Check if the Speaker object is disabled.");
         }
     }
 
     void TransitionToSimulation()
     {
-        // Turn off the file browser and turn on the simulation visual objects
-        if (fileSelectorPanel != null) fileSelectorPanel.SetActive(false);
-        if (simulationContent != null) simulationContent.SetActive(true);
+        if (fileSelectorPanel != null) 
+        {
+            fileSelectorPanel.SetActive(false);
+        }
+        else
+        {
+            Debug.LogWarning("[AudioFileScanner] 'File Selector Panel' field is unassigned in the Inspector!");
+        }
+
+        if (simulationContent != null) 
+        {
+            simulationContent.SetActive(true);
+        }
+        else
+        {
+            Debug.LogWarning("[AudioFileScanner] 'Simulation Content' field is unassigned in the Inspector!");
+        }
     }
 }
