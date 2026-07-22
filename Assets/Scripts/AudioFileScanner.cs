@@ -164,10 +164,14 @@ public class AudioFileScanner : MonoBehaviour
                 {
                     if (simulationAudioSource != null)
                     {
+                        simulationAudioSource.clip = loadedClip;
+                        
+                        // Explicitly enforce audio playback properties for MiddleVR
                         simulationAudioSource.volume = 1.0f;
                         simulationAudioSource.mute = false;
-                        simulationAudioSource.clip = loadedClip;
-
+                        simulationAudioSource.bypassEffects = true;
+                        simulationAudioSource.bypassListenerEffects = true;
+                        
                         loadedClip.LoadAudioData(); 
                         simulationAudioSource.Play();
 
