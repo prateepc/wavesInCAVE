@@ -25,7 +25,6 @@ public class AudioFileScanner : MonoBehaviour
     [Header("Audio Setup")]
     [Tooltip("Drag your CAVE Simulation speaker AudioSource here.")]
     public AudioSource simulationAudioSource; 
-    
 
     void Awake()
     {
@@ -61,13 +60,11 @@ public class AudioFileScanner : MonoBehaviour
             return;
         }
 
-        // Clean out existing UI button elements inside the scroll list
         foreach (Transform child in contentContainer)
         {
             Destroy(child.gameObject);
         }
 
-        // Ensure directory exists
         if (!Directory.Exists(folderPath))
         {
             Directory.CreateDirectory(folderPath);
@@ -93,14 +90,12 @@ public class AudioFileScanner : MonoBehaviour
             string fileName = Path.GetFileName(filePath);
             GameObject newButton = Instantiate(buttonPrefab, contentContainer);
             
-            // Assign button text label
             TextMeshProUGUI label = newButton.GetComponentInChildren<TextMeshProUGUI>();
             if (label != null)
             {
                 label.text = fileName;
             }
 
-            // Ensure button scale/position resets nicely inside layout groups
             RectTransform rect = newButton.GetComponent<RectTransform>();
             if (rect != null)
             {
@@ -110,11 +105,10 @@ public class AudioFileScanner : MonoBehaviour
                 rect.localPosition = pos;
             }
 
-            // Attach dynamic click event to initiate loading on button tap
             Button btnComponent = newButton.GetComponent<Button>();
             if (btnComponent != null)
             {
-                string capturedPath = filePath; // Capture local variable for lambda delegate
+                string capturedPath = filePath; 
                 btnComponent.onClick.AddListener(() => LoadAudioIntoSimulation(capturedPath));
             }
         }
@@ -127,14 +121,14 @@ public class AudioFileScanner : MonoBehaviour
     }
 
     /// <summary>
-    /// Asynchronously streams and decodes local WAV audio data off the disk without stalling CAVE frame rates.
+    /// Asynchronously streams local WAV audio, verifies speaker playback state,
+    /// and passes the active audio feed over to AdvancedWaveManager2.
     /// </summary>
     IEnumerator LoadAudioClipCoroutine(string absolutePath)
     {
         System.Uri fileUri = new System.Uri(absolutePath);
         string uriPath = fileUri.AbsoluteUri;
 
-        // Show loading status on the Telemetry Display immediately upon click
         if (uiTextDisplay != null) 
         {
             uiTextDisplay.text = $"<b>LOADING AUDIO...</b>\nFile: {Path.GetFileName(absolutePath)}";
@@ -162,44 +156,55 @@ public class AudioFileScanner : MonoBehaviour
                 }
                 else
                 {
-                    if (simulationAudioSource != null)
+                    if (simulationAudioSource == null)
                     {
+                        UpdateScreenDiagnostic("<b>ERROR:</b> simulationAudioSource is unassigned!");
+                    }
+                    else
+                    {
+                        // Ensure the speaker GameObject is active in hierarchy
+                        if (!simulationAudioSource.gameObject.activeInHierarchy)
+                        {
+                            simulationAudioSource.gameObject.SetActive(true);
+                        }
+
+                        // Assign clip and reset properties
                         simulationAudioSource.clip = loadedClip;
-                        
-                        // Explicitly enforce audio playback properties for MiddleVR
                         simulationAudioSource.volume = 1.0f;
                         simulationAudioSource.mute = false;
                         simulationAudioSource.bypassEffects = true;
                         simulationAudioSource.bypassListenerEffects = true;
                         
+                        // Force Spatial Blend to 2D (0.0) so CAVE listener positioning doesn't attenuate sound to 0
+                        simulationAudioSource.spatialBlend = 0.0f; 
+
                         loadedClip.LoadAudioData(); 
                         simulationAudioSource.Play();
 
-                        TransitionToSimulation();
-                    }
-                    else
-                    {
-                        UpdateScreenDiagnostic("<b>ERROR:</b> AudioSource missing on Scanner!");
+                        if (!simulationAudioSource.isPlaying)
+                        {
+                            UpdateScreenDiagnostic("<b>ERROR:</b> Speaker exists, but AudioSource.isPlaying is FALSE!");
+                        }
+                        else
+                        {
+                            TransitionToSimulation();
+                        }
                     }
                 }
             }
         }
     }
 
-    // Helper function to print diagnostics to your screen canvas
     private void UpdateScreenDiagnostic(string message)
     {
-        // 1. Keep or re-enable the file panel so you can read the error in the CAVE
         if (fileSelectorPanel != null) fileSelectorPanel.SetActive(true); 
 
-        // 2. Print error directly onto your TelemetryDisplay UI
         if (uiTextDisplay != null)
         {
             uiTextDisplay.text = message;
         }
         else
         {
-            // Fallback: try finding it automatically if unassigned
             GameObject foundUIObject = GameObject.Find("TelemetryDisplay");
             if (foundUIObject != null)
             {
@@ -209,45 +214,28 @@ public class AudioFileScanner : MonoBehaviour
         }
     }
 
-    IEnumerator VerifyPlaybackCoroutine(AudioSource source)
-    {
-        yield return null; // Wait 1 frame for audio playback initialization
-
-        Debug.Log($"[Acoustic Diagnostics] --- SPEAKER STATE CHECK ---");
-        Debug.Log($"Speaker Clip Assigned: {(source.clip != null ? source.clip.name : "NULL!")}");
-        Debug.Log($"Speaker Volume Level: {source.volume}");
-        Debug.Log($"Is Speaker Physically Playing? {source.isPlaying}");
-        Debug.Log($"Mute Active? {source.mute}");
-        Debug.Log($"----------------------------------------");
-        
-        if (source.clip != null && source.isPlaying)
-        {
-            Debug.Log("[Acoustic Diagnostics] SUCCESS! Audio is playing and sending signals to simulation.");
-        }
-        else if (!source.isPlaying)
-        {
-            Debug.LogError("[Acoustic Diagnostics] FAIL: AudioSource is NOT playing! Check if the Speaker object is disabled.");
-        }
-    }
-
     void TransitionToSimulation()
     {
         if (fileSelectorPanel != null) 
         {
             fileSelectorPanel.SetActive(false);
         }
-        else
-        {
-            Debug.LogWarning("[AudioFileScanner] 'File Selector Panel' field is unassigned in the Inspector!");
-        }
 
         if (simulationContent != null) 
         {
             simulationContent.SetActive(true);
         }
+
+        // Pass the AudioSource over to AdvancedWaveManager2
+        AdvancedWaveManager2 waveMgr2 = FindFirstObjectByType<AdvancedWaveManager2>();
+        if (waveMgr2 != null)
+        {
+            // Link the playing AudioSource so AdvancedWaveManager2 can sample spectrum data
+            waveMgr2.audioSource = simulationAudioSource; 
+        }
         else
         {
-            Debug.LogWarning("[AudioFileScanner] 'Simulation Content' field is unassigned in the Inspector!");
+            Debug.LogWarning("[AudioFileScanner] Could not find 'AdvancedWaveManager2' in active scene!");
         }
     }
 }
