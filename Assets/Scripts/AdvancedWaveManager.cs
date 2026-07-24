@@ -22,7 +22,8 @@ public class AdvancedWaveManager : MonoBehaviour
     public Slider sliderCount;
     public Slider sliderPower;
     public Slider sliderStep;
-    public Slider sliderFFTTimeWindow; // Time-duration window selection slider (0.1s - 2.0s)
+    public Slider sliderFFTTimeWindow;  // Time-duration window selection slider (0.1s - 2.0s)
+    public Slider sliderMaxFrequency;   // Slider to dynamically adjust upper X-axis range
     public Button generateButton;
 
     [Header("UI Display Links")]
@@ -70,6 +71,14 @@ public class AdvancedWaveManager : MonoBehaviour
     public GameObject graphBarPrefab;
     [Tooltip("Total vertical multiplier adjusting the display scale of both the FFT and raw wave graphs.")]
     public float graphBarHeightScale = 300.0f;
+    [Tooltip("Maximum upper limit for the FFT X-axis frequency spectrum (default 3000 Hz).")]
+    public float maxFFTFrequency = 3000.0f;
+
+    [Header("FFT dB Scale Settings")]
+    [Tooltip("Fixed minimum y-axis value in dB.")]
+    public float minFFTdB = -150.0f;
+    [Tooltip("Buffer in dB added above the peak detected magnitude.")]
+    public float maxdBBuffer = 10.0f;
 
     [Header("Multi-Peak Axis Tracking UI Elements")]
     [Tooltip("The prefab used to spawn sliding frequency labels along the X-axis.")]
@@ -161,6 +170,23 @@ public class AdvancedWaveManager : MonoBehaviour
             UpdateSliderLabel(sliderFFTTimeWindow);
         }
         UpdateFFTTimeWindow(sliderFFTTimeWindow != null ? sliderFFTTimeWindow.value : 0.10f);
+
+        // Initialize Max Frequency Range Slider (Default 3000 Hz)
+        if (sliderMaxFrequency != null)
+        {
+            sliderMaxFrequency.minValue = 500.0f;   // Lower bound
+            sliderMaxFrequency.maxValue = 10000.0f;  // Upper bound
+            sliderMaxFrequency.wholeNumbers = true; 
+            sliderMaxFrequency.value = 3000.0f;     // Default setting
+            
+            maxFFTFrequency = sliderMaxFrequency.value;
+            UpdateSliderLabel(sliderMaxFrequency);
+
+            sliderMaxFrequency.onValueChanged.AddListener((float newValue) => {
+                maxFFTFrequency = newValue;
+                UpdateSliderLabel(sliderMaxFrequency);
+            });
+        }
         
         InitializeDualGraphVisuals();
 
@@ -187,14 +213,11 @@ public class AdvancedWaveManager : MonoBehaviour
     {
         if (samplingFrequency <= 0) samplingFrequency = AudioSettings.outputSampleRate;
 
-        // Python concept equivalence mapping equation: target_samples = duration * sample_rate
         int rawSampleRequirement = Mathf.RoundToInt(windowDurationSeconds * (float)samplingFrequency);
 
-        // Unity Safety Snapping: Native built-in arrays strictly require a power of two between 64 and 8192
         currentFFTSize = Mathf.ClosestPowerOfTwo(rawSampleRequirement);
         currentFFTSize = Mathf.Clamp(currentFFTSize, 64, 8192);
 
-        // Safely reallocate monitoring metrics buffer spaces instantly
         spectrumDataArray = new float[currentFFTSize];
     }
 
@@ -219,7 +242,7 @@ public class AdvancedWaveManager : MonoBehaviour
                     {
                         barRect.anchorMin = new Vector2(0f, 0f);
                         barRect.anchorMax = new Vector2(0f, 0f);
-                        barRect.pivot = new Vector2(0.5f, 0f); // Bottom anchor matching standard spectra charts
+                        barRect.pivot = new Vector2(0.5f, 0f); 
                         barRect.anchoredPosition = new Vector2((i * barWidth) + (barWidth / 2f), 0f);
                         barRect.sizeDelta = new Vector2(barWidth * 0.85f, 0f);
                         initializedFFTBars.Add(barRect);
@@ -243,7 +266,7 @@ public class AdvancedWaveManager : MonoBehaviour
                     {
                         barRect.anchorMin = new Vector2(0f, 0.5f);
                         barRect.anchorMax = new Vector2(0f, 0.5f);
-                        barRect.pivot = new Vector2(0.5f, 0.5f); // Midline anchor matching standard oscillo-waves
+                        barRect.pivot = new Vector2(0.5f, 0.5f); 
                         barRect.anchoredPosition = new Vector2((i * barWidth) + (barWidth / 2f), 0f);
                         barRect.sizeDelta = new Vector2(barWidth * 0.85f, 0f);
                         initializedTimeBars.Add(barRect);
@@ -264,10 +287,8 @@ public class AdvancedWaveManager : MonoBehaviour
         bool isFFTActive = fftGraphPanel != null && fftGraphPanel.activeSelf;
         bool isTimeActive = timeGraphPanel != null && timeGraphPanel.activeSelf;
 
-        // Safety check: If neither panel is open, or audio arrays aren't ready, skip processing
         if ((!isFFTActive && !isTimeActive) || audioSource == null || spectrumDataArray == null) return;
 
-        // Wipe old sliding telemetry text labels from the layout
         for (int i = activeLabelPool.Count - 1; i >= 0; i--)
         {
             if (activeLabelPool[i] != null) Destroy(activeLabelPool[i]);
@@ -277,10 +298,7 @@ public class AdvancedWaveManager : MonoBehaviour
         // --- PROCESS TIME-DOMAIN WAVEFORM DISPLAY GRAPH ---
         if (isTimeActive && initializedTimeBars.Count > 0)
         {
-            // Dynamic Allocation: Match the audio buffer array size exactly to the number of spawned UI bars
             float[] timeDomainSamples = new float[initializedTimeBars.Count];
-            
-            // Use audioSource instead of AudioListener to protect against the Unity Editor 'Mute Audio' trap
             audioSource.GetOutputData(timeDomainSamples, 0);
 
             for (int i = 0; i < initializedTimeBars.Count; i++)
@@ -290,7 +308,6 @@ public class AdvancedWaveManager : MonoBehaviour
                 float sampleWaveAmplitude = timeDomainSamples[i] * (graphBarHeightScale * 0.5f);
                 Vector2 size = initializedTimeBars[i].sizeDelta;
                 
-                // Keeps bars standing at a visible baseline minimum height of 2 units
                 size.y = Mathf.Lerp(size.y, Mathf.Max(Mathf.Abs(sampleWaveAmplitude), 2f), Time.deltaTime * 20f);
                 initializedTimeBars[i].sizeDelta = size;
             }
@@ -302,46 +319,68 @@ public class AdvancedWaveManager : MonoBehaviour
             float panelWidth = fftGraphPanel.GetComponent<RectTransform>().rect.width;
             int totalBars = initializedFFTBars.Count;
 
-            // Pull spectrum directly from the generation component source
             audioSource.GetSpectrumData(spectrumDataArray, 0, FFTWindow.BlackmanHarris);
 
+            float halfSampleRate = (float)(samplingFrequency / 2.0);
+
+            // 1. Convert magnitudes to dB and calculate max for dynamic ceiling buffer
+            float[] sampledBValues = new float[totalBars];
+            float maxComputeddB = -999f;
+
+            for (int i = 0; i < totalBars; i++)
+            {
+                // Dynamic upper frequency mapping governed by maxFFTFrequency (slider controlled)
+                float targetFrequency = ((float)i / (totalBars - 1)) * maxFFTFrequency;
+                int spectrumIndex = Mathf.RoundToInt((targetFrequency / halfSampleRate) * currentFFTSize);
+                spectrumIndex = Mathf.Clamp(spectrumIndex, 0, currentFFTSize - 1);
+
+                float rawMagnitude = spectrumDataArray[spectrumIndex];
+
+                float dB = 20f * Mathf.Log10(rawMagnitude + 1e-12f);
+                sampledBValues[i] = dB;
+
+                if (dB > maxComputeddB)
+                {
+                    maxComputeddB = dB;
+                }
+            }
+
+            float dynamicMaxdB = maxComputeddB + maxdBBuffer;
+
+            // 2. Scale visual bar heights relative to [-150 dB, dynamicMaxdB]
             for (int i = 0; i < totalBars; i++)
             {
                 if (initializedFFTBars[i] == null) continue;
 
-                // Linear index calculation focused directly on the audible musical spectrum (0Hz - 5000Hz)
-                float halfSampleRate = (float)(samplingFrequency / 2.0);
-                float maxViewableFrequency = 5000f; 
-                
-                float targetFrequency = ((float)i / totalBars) * maxViewableFrequency;
-                int spectrumIndex = Mathf.RoundToInt((targetFrequency / halfSampleRate) * currentFFTSize);
-                spectrumIndex = Mathf.Clamp(spectrumIndex, 0, currentFFTSize - 1);
+                float currentdB = sampledBValues[i];
 
-                float sampleIntensity = spectrumDataArray[spectrumIndex];
-                
-                // Linear scale amplification multiplier to bring low-intensity harmonic values into view
-                float dynamicHeightValue = Mathf.Clamp(sampleIntensity * graphBarHeightScale * 3f, 2f, graphBarHeightScale);
+                float normalizedHeight = Mathf.InverseLerp(minFFTdB, dynamicMaxdB, currentdB);
+
+                float targetHeight = normalizedHeight * graphBarHeightScale;
+                targetHeight = Mathf.Max(targetHeight, 2f); 
 
                 Vector2 alteredDimensions = initializedFFTBars[i].sizeDelta;
-                alteredDimensions.y = Mathf.Lerp(alteredDimensions.y, dynamicHeightValue, Time.deltaTime * 14f);
+                alteredDimensions.y = Mathf.Lerp(alteredDimensions.y, targetHeight, Time.deltaTime * 14f);
                 initializedFFTBars[i].sizeDelta = alteredDimensions;
 
-                // --- MULTI-PEAK TRACKER RUNTIME ANALYSIS ---
-                if (i > 0 && i < totalBars - 1 && peakFreqLabelPrefab != null && peakAmpLabelPrefab != null)
+                // --- MULTI-PEAK TRACKER RUNTIME ANALYSIS (PROMINENT FILTERED) ---
+                if (i > 2 && i < totalBars - 3 && peakFreqLabelPrefab != null && peakAmpLabelPrefab != null)
                 {
-                    float currentVisualHeight = alteredDimensions.y;
-                    float prevHeight = initializedFFTBars[i - 1].sizeDelta.y;
-                    float nextHeight = initializedFFTBars[i + 1].sizeDelta.y;
+                    bool isLocalMax = currentdB > sampledBValues[i - 1] && currentdB > sampledBValues[i + 1] &&
+                                     currentdB > sampledBValues[i - 2] && currentdB > sampledBValues[i + 2] &&
+                                     currentdB > sampledBValues[i - 3] && currentdB > sampledBValues[i + 3];
 
-                    // Peak evaluation check matching neighbor nodes
-                    if (sampleIntensity > peakDetectionThreshold && currentVisualHeight > prevHeight && currentVisualHeight > nextHeight)
+                    bool isProminentEnough = currentdB > (maxComputeddB - 25.0f);
+                    bool satisfiesFloor = currentdB > -90.0f;
+                    bool underLabelCap = activeLabelPool.Count < 10; 
+
+                    if (isLocalMax && isProminentEnough && satisfiesFloor && underLabelCap)
                     {
                         float horizontalPercentage = (float)i / (totalBars - 1);
                         float targetXCoordinate = (horizontalPercentage * panelWidth) - (panelWidth / 2f);
                         float peakBarLocalYHeight = alteredDimensions.y;
 
-                        float peakFrequency = spectrumIndex * halfSampleRate / currentFFTSize;
-                        float pressure = sampleIntensity * graphSensitivityMultiplier;
+                        float targetFrequency = ((float)i / (totalBars - 1)) * maxFFTFrequency;
 
                         // --- SPAWN FREQUENCY LABEL ---
                         GameObject freqLabel = Instantiate(peakFreqLabelPrefab, fftGraphPanel.transform, false);
@@ -349,27 +388,27 @@ public class AdvancedWaveManager : MonoBehaviour
                         TextMeshProUGUI freqText = freqLabel.GetComponent<TextMeshProUGUI>();
                         if (freqText != null)
                         {
-                            freqText.text = $"{peakFrequency:F0} Hz";
+                            freqText.text = $"{targetFrequency:F0} Hz";
                             RectTransform freqRect = freqLabel.GetComponent<RectTransform>();
                             Vector3 localPos = freqRect.localPosition;
                             localPos.x = targetXCoordinate;
                             freqRect.localPosition = localPos;
                         }
 
-                        // --- SPAWN AMPLITUDE LABEL ---
+                        // --- SPAWN dB AMPLITUDE LABEL ---
                         GameObject ampLabel = Instantiate(peakAmpLabelPrefab, fftGraphPanel.transform, false);
                         activeLabelPool.Add(ampLabel);
                         TextMeshProUGUI ampText = ampLabel.GetComponent<TextMeshProUGUI>();
                         if (ampText != null)
                         {
-                            ampText.text = $"{pressure:F2} Pa";
+                            ampText.text = $"{currentdB:F1} dB";
                             RectTransform ampRect = ampLabel.GetComponent<RectTransform>();
                             Vector3 localPos = ampRect.localPosition;
                             localPos.x = targetXCoordinate; 
                             ampRect.localPosition = localPos;
 
                             Vector2 currentAnchoredPos = ampRect.anchoredPosition;
-                            currentAnchoredPos.y = peakBarLocalYHeight; 
+                            currentAnchoredPos.y = peakBarLocalYHeight + 15f; 
                             ampRect.anchoredPosition = currentAnchoredPos;
                         }
                     }
@@ -385,8 +424,8 @@ public class AdvancedWaveManager : MonoBehaviour
         if (sliderCount != null) numHarmonics = Mathf.RoundToInt(sliderCount.value);
         if (sliderPower != null) decayPower = sliderPower.value;
         if (sliderStep != null) stepMultiplier = Mathf.RoundToInt(sliderStep.value);
+        if (sliderMaxFrequency != null) maxFFTFrequency = sliderMaxFrequency.value;
         
-        // Dynamic time context resolution checks
         if (sliderFFTTimeWindow != null) UpdateFFTTimeWindow(sliderFFTTimeWindow.value);
 
         ConfigureAndStartSimulation();
