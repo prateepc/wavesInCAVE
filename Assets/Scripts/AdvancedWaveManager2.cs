@@ -86,16 +86,19 @@ public class AdvancedWaveManager2 : MonoBehaviour
     public float minFFTdB = -150.0f;
     public float maxdBBuffer = 10.0f;
 
-    [Header("Multi-Peak Axis Tracking UI Elements")]
-    public GameObject peakFreqLabelPrefab;
-    public GameObject peakAmpLabelPrefab;
-    public float peakDetectionThreshold = 0.001f;
-    public float graphSensitivityMultiplier = 20.0f;
+    [Header("Axis Labeling System UI Prefabs")]
+    [Tooltip("Prefab containing a TextMeshProUGUI component used to instantiate axis tick labels.")]
+    public GameObject axisLabelPrefab;
 
     private List<GameObject> activeWaves = new List<GameObject>();
     private List<RectTransform> initializedFFTBars = new List<RectTransform>();
     private List<RectTransform> initializedTimeBars = new List<RectTransform>();
-    private List<GameObject> activeLabelPool = new List<GameObject>();
+    
+    // Static Axis Label Management
+    private List<TextMeshProUGUI> fftXAxisLabels = new List<TextMeshProUGUI>();
+    private List<TextMeshProUGUI> timeXAxisLabels = new List<TextMeshProUGUI>();
+    private List<TextMeshProUGUI> fftYAxisLabels = new List<TextMeshProUGUI>();
+    private List<TextMeshProUGUI> timeYAxisLabels = new List<TextMeshProUGUI>();
     
     // Core analytical variables driven by real-time audio
     private float calculatedRMS = 0f;
@@ -161,11 +164,13 @@ public class AdvancedWaveManager2 : MonoBehaviour
             sliderMaxFrequency.onValueChanged.AddListener((float newValue) => {
                 maxFFTFrequency = newValue;
                 UpdateSliderLabel(sliderMaxFrequency);
+                UpdateFFTAxisLabelValues();
             });
         }
 
         LoadFullAudioClipData();
         InitializeDualGraphVisuals();
+        InitializeAxisLabels();
         GenerateStaticFourierSlices();
         GenerateDynamicLegendTexture();
         analysisComplete = true;
@@ -260,11 +265,175 @@ public class AdvancedWaveManager2 : MonoBehaviour
         }
     }
 
+    private void InitializeAxisLabels()
+    {
+        if (axisLabelPrefab == null) return;
+
+        const int numXLabels = 11;
+        float xOffset = 18.0f;
+
+        // ==========================================
+        // 1. FFT PANEL LABELS (16 Y-Axis Labels)
+        // ==========================================
+        if (fftGraphPanel != null)
+        {
+            RectTransform panelRect = fftGraphPanel.GetComponent<RectTransform>();
+            float panelWidth = panelRect.rect.width;
+            float panelHeight = panelRect.rect.height;
+
+            // --- FFT X-Axis Labels (11 Labels: 0% to 100%) ---
+            for (int i = 0; i < numXLabels; i++)
+            {
+                GameObject labelObj = Instantiate(axisLabelPrefab, fftGraphPanel.transform, false);
+                labelObj.name = $"FFT_XAxis_Label_{i}";
+                TextMeshProUGUI labelText = labelObj.GetComponent<TextMeshProUGUI>();
+
+                if (labelText != null)
+                {
+                    labelText.alignment = TextAlignmentOptions.Center;
+
+                    RectTransform labelRect = labelObj.GetComponent<RectTransform>();
+                    labelRect.anchorMin = new Vector2(0f, 0f);
+                    labelRect.anchorMax = new Vector2(0f, 0f);
+                    labelRect.pivot = new Vector2(0.5f, 1f);
+
+                    float normalizedStep = i / (float)(numXLabels - 1);
+                    float xPos = (normalizedStep * panelWidth) + xOffset;
+                    labelRect.anchoredPosition = new Vector2(xPos, -8f);
+
+                    fftXAxisLabels.Add(labelText);
+                }
+            }
+
+            // --- FFT Y-Axis Labels (16 Labels: Extending proportionally past 0) ---
+            int fftNumYLabels = 16;
+            float heightPerStep = panelHeight / 10.0f;
+
+            for (int i = 0; i < fftNumYLabels; i++)
+            {
+                GameObject labelObj = Instantiate(axisLabelPrefab, fftGraphPanel.transform, false);
+                labelObj.name = $"FFT_YAxis_Label_{i}";
+                TextMeshProUGUI labelText = labelObj.GetComponent<TextMeshProUGUI>();
+
+                if (labelText != null)
+                {
+                    labelText.alignment = TextAlignmentOptions.Right;
+
+                    RectTransform labelRect = labelObj.GetComponent<RectTransform>();
+                    labelRect.anchorMin = new Vector2(0f, 0f);
+                    labelRect.anchorMax = new Vector2(0f, 0f);
+                    labelRect.pivot = new Vector2(1f, 0.5f);
+
+                    float yPos = i * heightPerStep;
+                    labelRect.anchoredPosition = new Vector2(-10f, yPos);
+
+                    fftYAxisLabels.Add(labelText);
+                }
+            }
+
+            UpdateFFTAxisLabelValues();
+        }
+
+        // ==========================================
+        // 2. TIME WAVEFORM PANEL LABELS (11 Y-Axis Labels)
+        // ==========================================
+        if (timeGraphPanel != null && audioSource != null && audioSource.clip != null)
+        {
+            RectTransform panelRect = timeGraphPanel.GetComponent<RectTransform>();
+            float panelWidth = panelRect.rect.width;
+            float panelHeight = panelRect.rect.height;
+            float totalClipDuration = audioSource.clip.length;
+
+            // --- Time X-Axis Labels (11 Labels) ---
+            for (int i = 0; i < numXLabels; i++)
+            {
+                GameObject labelObj = Instantiate(axisLabelPrefab, timeGraphPanel.transform, false);
+                labelObj.name = $"Time_XAxis_Label_{i}";
+                TextMeshProUGUI labelText = labelObj.GetComponent<TextMeshProUGUI>();
+
+                if (labelText != null)
+                {
+                    labelText.alignment = TextAlignmentOptions.Center;
+
+                    RectTransform labelRect = labelObj.GetComponent<RectTransform>();
+                    labelRect.anchorMin = new Vector2(0f, 0f);
+                    labelRect.anchorMax = new Vector2(0f, 0f);
+                    labelRect.pivot = new Vector2(0.5f, 1f);
+
+                    float normalizedStep = i / (float)(numXLabels - 1);
+                    float xPos = (normalizedStep * panelWidth) + xOffset;
+                    
+                    labelRect.anchoredPosition = new Vector2(xPos, -68f);
+
+                    float timestamp = normalizedStep * totalClipDuration;
+                    labelText.text = $"{timestamp:F2}";
+
+                    timeXAxisLabels.Add(labelText);
+                }
+            }
+
+            // --- Time Y-Axis Labels (11 Labels: -1.0 to +1.0) ---
+            int timeNumYLabels = 11;
+
+            for (int i = 0; i < timeNumYLabels; i++)
+            {
+                GameObject labelObj = Instantiate(axisLabelPrefab, timeGraphPanel.transform, false);
+                labelObj.name = $"Time_YAxis_Label_{i}";
+                TextMeshProUGUI labelText = labelObj.GetComponent<TextMeshProUGUI>();
+
+                if (labelText != null)
+                {
+                    labelText.alignment = TextAlignmentOptions.Right;
+
+                    RectTransform labelRect = labelObj.GetComponent<RectTransform>();
+                    labelRect.anchorMin = new Vector2(0f, 0f);
+                    labelRect.anchorMax = new Vector2(0f, 0f);
+                    labelRect.pivot = new Vector2(1f, 0.5f);
+
+                    float normalizedStep = i / (float)(timeNumYLabels - 1);
+                    float yPos = normalizedStep * panelHeight;
+                    labelRect.anchoredPosition = new Vector2(-10f, yPos);
+
+                    float amplitudeVal = Mathf.Lerp(-1.0f, 1.0f, normalizedStep);
+                    labelText.text = $"{amplitudeVal:F1}";
+
+                    timeYAxisLabels.Add(labelText);
+                }
+            }
+        }
+    }
+
+    private void UpdateFFTAxisLabelValues()
+    {
+        // Update X-Axis Frequency Labels
+        if (fftXAxisLabels.Count > 0)
+        {
+            int numLabels = fftXAxisLabels.Count;
+            for (int i = 0; i < numLabels; i++)
+            {
+                float frequencyValue = (i / (float)(numLabels - 1)) * maxFFTFrequency;
+                fftXAxisLabels[i].text = $"{frequencyValue:F0}";
+            }
+        }
+
+        // Update Y-Axis dB Values (-150 to +75 without "dB" text suffix)
+        if (fftYAxisLabels.Count > 0)
+        {
+            int numLabels = fftYAxisLabels.Count;
+            float stepSize = Mathf.Abs(minFFTdB) / 10.0f; // 15 units per step
+
+            for (int i = 0; i < numLabels; i++)
+            {
+                float dBValue = minFFTdB + (i * stepSize);
+                fftYAxisLabels[i].text = $"{dBValue:F0}";
+            }
+        }
+    }
+
     private void UpdatePlayheadAndFFT()
     {
         if (audioSource == null || audioSource.clip == null) return;
 
-        // Move playhead line across time graph relative to track playback
         if (timePlayheadLine != null && timeGraphPanel != null)
         {
             RectTransform panelRect = timeGraphPanel.GetComponent<RectTransform>();
@@ -276,7 +445,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
             timePlayheadLine.anchoredPosition = currentPosition;
         }
 
-        // Compute FFT at 10x the window sample duration
         float windowDurationSeconds = (float)windowSizeSamples / (float)samplingFrequency;
         float fftComputeInterval = windowDurationSeconds * 10.0f;
 
@@ -307,13 +475,11 @@ public class AdvancedWaveManager2 : MonoBehaviour
     {
         if (fftGraphPanel == null || !fftGraphPanel.activeSelf || audioSource == null) return;
 
-        if (sliderMaxFrequency != null) maxFFTFrequency = sliderMaxFrequency.value;
-
-        for (int i = activeLabelPool.Count - 1; i >= 0; i--)
+        if (sliderMaxFrequency != null && maxFFTFrequency != sliderMaxFrequency.value)
         {
-            if (activeLabelPool[i] != null) Destroy(activeLabelPool[i]);
+            maxFFTFrequency = sliderMaxFrequency.value;
+            UpdateFFTAxisLabelValues();
         }
-        activeLabelPool.Clear();
 
         if (spectrumDataArray == null || spectrumDataArray.Length != windowSizeSamples)
         {
@@ -322,13 +488,11 @@ public class AdvancedWaveManager2 : MonoBehaviour
 
         audioSource.GetSpectrumData(spectrumDataArray, 0, FFTWindow.BlackmanHarris);
 
-        // Apply chosen windowing technique
         for (int i = 0; i < spectrumDataArray.Length; i++)
         {
             spectrumDataArray[i] = ApplyWindowFunction(spectrumDataArray[i], i, spectrumDataArray.Length);
         }
 
-        float panelWidth = fftGraphPanel.GetComponent<RectTransform>().rect.width;
         int totalBars = initializedFFTBars.Count;
         float halfSampleRate = (float)(samplingFrequency / 2.0);
 
@@ -369,45 +533,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
             Vector2 alteredDimensions = initializedFFTBars[i].sizeDelta;
             alteredDimensions.y = Mathf.Lerp(alteredDimensions.y, targetHeight, Time.deltaTime * 14f);
             initializedFFTBars[i].sizeDelta = alteredDimensions;
-
-            if (i > 2 && i < totalBars - 3 && peakFreqLabelPrefab != null && peakAmpLabelPrefab != null)
-            {
-                bool isLocalMax = currentdB > sampledBValues[i - 1] && currentdB > sampledBValues[i + 1] &&
-                                 currentdB > sampledBValues[i - 2] && currentdB > sampledBValues[i + 2];
-
-                bool isProminentEnough = currentdB > (maxComputeddB - 25.0f) && currentdB > -90.0f;
-
-                if (isLocalMax && isProminentEnough && activeLabelPool.Count < 10)
-                {
-                    float horizontalPercentage = (float)i / (totalBars - 1);
-                    float targetXCoordinate = (horizontalPercentage * panelWidth) - (panelWidth / 2f);
-
-                    GameObject freqLabel = Instantiate(peakFreqLabelPrefab, fftGraphPanel.transform, false);
-                    activeLabelPool.Add(freqLabel);
-                    TextMeshProUGUI freqText = freqLabel.GetComponent<TextMeshProUGUI>();
-                    if (freqText != null)
-                    {
-                        freqText.text = $"{(((float)i / (totalBars - 1)) * maxFFTFrequency):F0} Hz";
-                        RectTransform freqRect = freqLabel.GetComponent<RectTransform>();
-                        Vector3 lPos = freqRect.localPosition;
-                        lPos.x = targetXCoordinate;
-                        freqRect.localPosition = lPos;
-                    }
-
-                    GameObject ampLabel = Instantiate(peakAmpLabelPrefab, fftGraphPanel.transform, false);
-                    activeLabelPool.Add(ampLabel);
-                    TextMeshProUGUI ampText = ampLabel.GetComponent<TextMeshProUGUI>();
-                    if (ampText != null)
-                    {
-                        ampText.text = $"{currentdB:F1} dB";
-                        RectTransform ampRect = ampLabel.GetComponent<RectTransform>();
-                        Vector3 lPos = ampRect.localPosition;
-                        lPos.x = targetXCoordinate;
-                        ampRect.localPosition = lPos;
-                        ampRect.anchoredPosition = new Vector2(ampRect.anchoredPosition.x, targetHeight + 15f);
-                    }
-                }
-            }
         }
     }
 
@@ -419,7 +544,11 @@ public class AdvancedWaveManager2 : MonoBehaviour
 
     public void ReadSlidersAndRebuildSimulation()
     {
-        if (sliderMaxFrequency != null) maxFFTFrequency = sliderMaxFrequency.value;
+        if (sliderMaxFrequency != null)
+        {
+            maxFFTFrequency = sliderMaxFrequency.value;
+            UpdateFFTAxisLabelValues();
+        }
     }
 
     void AnalyzeAudioSourceVolume()
