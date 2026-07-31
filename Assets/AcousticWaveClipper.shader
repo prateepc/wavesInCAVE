@@ -2,7 +2,7 @@ Shader "Custom/AcousticWaveClipper"
 {
     Properties
     {
-        _Color ("Main Color (Managed by Script)", Color) = (1,1,1,0.5)
+        [PerRendererData] _Color ("Main Color (Managed by Script)", Color) = (1,1,1,0.5)
     }
     SubShader
     {
@@ -31,9 +31,10 @@ Shader "Custom/AcousticWaveClipper"
                 float3 worldPos : TEXCOORD0;
             };
 
-            float4 _Color;
-            float4 _ChamberMin; // Absolute Minimum boundaries (X_Min, Y_Min, Z_Min)
-            float4 _ChamberMax; // Absolute Maximum boundaries (X_Max, Y_Max, Z_Max)
+            // Matches MaterialPropertyBlock inputs from C#
+            fixed4 _Color;
+            float4 _ChamberMin; 
+            float4 _ChamberMax; 
 
             v2f vert (appdata v)
             {
@@ -50,7 +51,7 @@ Shader "Custom/AcousticWaveClipper"
                     i.worldPos.y < _ChamberMin.y || i.worldPos.y > _ChamberMax.y ||
                     i.worldPos.z < _ChamberMin.z || i.worldPos.z > _ChamberMax.z)
                 {
-                    discard; // Cleanly clip any pixel poking outside the visual room surfaces
+                    discard; 
                 }
 
                 return _Color;
@@ -59,4 +60,3 @@ Shader "Custom/AcousticWaveClipper"
         }
     }
 }
-

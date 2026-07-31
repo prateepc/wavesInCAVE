@@ -23,6 +23,16 @@ public class AdvancedWaveManager2 : MonoBehaviour
         public Color highPressureCrest;
     }
 
+    [System.Serializable]
+    public struct FrequencyBand
+    {
+        public string bandName;
+        public float minFrequency;
+        public float maxFrequency;
+        [HideInInspector] public float currentAmplitude;
+        [HideInInspector] public float peakFrequency;
+    }
+
     [Header("Audio File Target")]
     [Tooltip("The speaker audio source playing the loaded WAV recording.")]
     public AudioSource audioSource;
@@ -40,6 +50,17 @@ public class AdvancedWaveManager2 : MonoBehaviour
     public TMP_Dropdown windowTypeDropdown;
     [Tooltip("Size of the FFT window in samples (Power of 2).")]
     public int windowSizeSamples = 1024;
+
+    [Header("Multi-Frequency Configuration (Step 1 & 2)")]
+    public FrequencyBand[] frequencyBands = new FrequencyBand[]
+    {
+        new FrequencyBand { bandName = "Sub/Bass", minFrequency = 20f, maxFrequency = 250f },
+        new FrequencyBand { bandName = "Midrange", minFrequency = 250f, maxFrequency = 2000f },
+        new FrequencyBand { bandName = "Highs/Treble", minFrequency = 2000f, maxFrequency = 20000f }
+    };
+
+    [Tooltip("Speed of sound in m/s used to calculate spatial wavelength for multi-frequency phase shifts.")]
+    public float speedOfSound = 343.0f;
 
     [Header("UI Display Links (Outputs Only)")]
     public TextMeshProUGUI uiTextDisplay;
@@ -67,7 +88,9 @@ public class AdvancedWaveManager2 : MonoBehaviour
     [Header("Acoustic Layer Color Matrices")]
     public BipolarSpectrumPair[] harmonicColorPalettes = new BipolarSpectrumPair[]
     {
-        new BipolarSpectrumPair { lowPressureTrough = Color.blue, zeroPressureEquilibrium = Color.white, highPressureCrest = Color.red }
+        new BipolarSpectrumPair { lowPressureTrough = Color.blue, zeroPressureEquilibrium = Color.white, highPressureCrest = Color.red },
+        new BipolarSpectrumPair { lowPressureTrough = Color.cyan, zeroPressureEquilibrium = Color.white, highPressureCrest = Color.yellow },
+        new BipolarSpectrumPair { lowPressureTrough = Color.magenta, zeroPressureEquilibrium = Color.white, highPressureCrest = Color.green }
     };
 
     [Header("Real-Time Dual-Graphing System UI Links")]
@@ -89,6 +112,20 @@ public class AdvancedWaveManager2 : MonoBehaviour
     [Header("Axis Labeling System UI Prefabs")]
     [Tooltip("Prefab containing a TextMeshProUGUI component used to instantiate axis tick labels.")]
     public GameObject axisLabelPrefab;
+
+    [Header("Step 3 Smoothing Controls")]
+    [Tooltip("Controls how quickly wave colors react to sudden volume spikes.")]
+    public float attackSpeed = 25.0f;
+    [Tooltip("Controls how smoothly wave colors fade out when sound decays (higher = smoother fade).")]
+    public float releaseSpeed = 5.0f;
+    [Tooltip("Minimum reference pressure threshold (in Pascals) for 0 dB SPL calculations.")]
+    public float referencePressure = 0.00002f; // Standard 20 micropascals threshold
+
+    [Header("Step 3 Visual Wave Tuning")]
+    [Tooltip("Visual wave animation frequency in Hz. Kept low (1-3 Hz) to prevent high-frequency flickering.")]
+    public float visualWaveFrequency = 2.0f;
+
+    private float[] smoothedBandAmplitudes;
 
     private List<GameObject> activeWaves = new List<GameObject>();
     private List<RectTransform> initializedFFTBars = new List<RectTransform>();
@@ -272,16 +309,12 @@ public class AdvancedWaveManager2 : MonoBehaviour
         const int numXLabels = 11;
         float xOffset = 18.0f;
 
-        // ==========================================
-        // 1. FFT PANEL LABELS (16 Y-Axis Labels)
-        // ==========================================
         if (fftGraphPanel != null)
         {
             RectTransform panelRect = fftGraphPanel.GetComponent<RectTransform>();
             float panelWidth = panelRect.rect.width;
             float panelHeight = panelRect.rect.height;
 
-            // --- FFT X-Axis Labels (11 Labels: 0% to 100%) ---
             for (int i = 0; i < numXLabels; i++)
             {
                 GameObject labelObj = Instantiate(axisLabelPrefab, fftGraphPanel.transform, false);
@@ -305,7 +338,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
                 }
             }
 
-            // --- FFT Y-Axis Labels (16 Labels: Extending proportionally past 0) ---
             int fftNumYLabels = 16;
             float heightPerStep = panelHeight / 10.0f;
 
@@ -334,9 +366,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
             UpdateFFTAxisLabelValues();
         }
 
-        // ==========================================
-        // 2. TIME WAVEFORM PANEL LABELS (11 Y-Axis Labels)
-        // ==========================================
         if (timeGraphPanel != null && audioSource != null && audioSource.clip != null)
         {
             RectTransform panelRect = timeGraphPanel.GetComponent<RectTransform>();
@@ -344,7 +373,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
             float panelHeight = panelRect.rect.height;
             float totalClipDuration = audioSource.clip.length;
 
-            // --- Time X-Axis Labels (11 Labels) ---
             for (int i = 0; i < numXLabels; i++)
             {
                 GameObject labelObj = Instantiate(axisLabelPrefab, timeGraphPanel.transform, false);
@@ -372,7 +400,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
                 }
             }
 
-            // --- Time Y-Axis Labels (11 Labels: -1.0 to +1.0) ---
             int timeNumYLabels = 11;
 
             for (int i = 0; i < timeNumYLabels; i++)
@@ -405,7 +432,6 @@ public class AdvancedWaveManager2 : MonoBehaviour
 
     private void UpdateFFTAxisLabelValues()
     {
-        // Update X-Axis Frequency Labels
         if (fftXAxisLabels.Count > 0)
         {
             int numLabels = fftXAxisLabels.Count;
@@ -416,11 +442,10 @@ public class AdvancedWaveManager2 : MonoBehaviour
             }
         }
 
-        // Update Y-Axis dB Values (-150 to +75 without "dB" text suffix)
         if (fftYAxisLabels.Count > 0)
         {
             int numLabels = fftYAxisLabels.Count;
-            float stepSize = Mathf.Abs(minFFTdB) / 10.0f; // 15 units per step
+            float stepSize = Mathf.Abs(minFFTdB) / 10.0f;
 
             for (int i = 0; i < numLabels; i++)
             {
@@ -493,9 +518,35 @@ public class AdvancedWaveManager2 : MonoBehaviour
             spectrumDataArray[i] = ApplyWindowFunction(spectrumDataArray[i], i, spectrumDataArray.Length);
         }
 
-        int totalBars = initializedFFTBars.Count;
         float halfSampleRate = (float)(samplingFrequency / 2.0);
+        for (int b = 0; b < frequencyBands.Length; b++)
+        {
+            float sumAmp = 0f;
+            int count = 0;
+            float maxMagInBand = -1f;
+            float peakFreqInBand = 0f;
 
+            int minIdx = Mathf.Clamp(Mathf.RoundToInt((frequencyBands[b].minFrequency / halfSampleRate) * windowSizeSamples), 0, windowSizeSamples - 1);
+            int maxIdx = Mathf.Clamp(Mathf.RoundToInt((frequencyBands[b].maxFrequency / halfSampleRate) * windowSizeSamples), 0, windowSizeSamples - 1);
+
+            for (int idx = minIdx; idx <= maxIdx; idx++)
+            {
+                float mag = spectrumDataArray[idx];
+                sumAmp += mag;
+                count++;
+
+                if (mag > maxMagInBand)
+                {
+                    maxMagInBand = mag;
+                    peakFreqInBand = ((float)idx / windowSizeSamples) * halfSampleRate;
+                }
+            }
+
+            frequencyBands[b].currentAmplitude = count > 0 ? (sumAmp / count) : 0f;
+            frequencyBands[b].peakFrequency = peakFreqInBand;
+        }
+
+        int totalBars = initializedFFTBars.Count;
         float[] sampledBValues = new float[totalBars];
         float maxComputeddB = -999f;
         float highestMagnitudeSeen = -1f;
@@ -576,6 +627,8 @@ public class AdvancedWaveManager2 : MonoBehaviour
 
     void UpdateVisualShellsWithAudio()
     {
+        if (activeWaves == null || activeWaves.Count == 0) return;
+
         float roomFadeMaxDistance = chamberMax.z - chamberMin.z;
         MaterialPropertyBlock propBlock = new MaterialPropertyBlock();
 
@@ -584,41 +637,50 @@ public class AdvancedWaveManager2 : MonoBehaviour
             GameObject wave = activeWaves[i];
             if (wave == null) continue;
 
-            float r = (wave.transform.localScale.x) / 2f; 
+            float r = wave.transform.localScale.x / 2f; 
             float distanceDecay = Mathf.Clamp01(1.0f - (r / roomFadeMaxDistance));
 
-            float waveValue = Mathf.Sin(Time.time * 5.0f - r) * calculatedRMS;
-            float normalizedPressure = Mathf.Clamp(waveValue, -1f, 1f);
-
-            Color dynamicColor = Color.white;
-            BipolarSpectrumPair palette = harmonicColorPalettes[0];
-
-            if (normalizedPressure >= 0f)
+            // 1. Spatial frequency scaling (k = 1.2 ensures multiple cycles fit in chamber)
+            float visualOmega = 2.0f * Mathf.PI * visualWaveFrequency; 
+            float visualK = 1.2f; 
+            
+            // 2. Silence Gate: Only animate waves if calculated RMS passes threshold (> 0.001)
+            float localWavePressure = 0f;
+            if (calculatedRMS > 0.001f)
             {
-                dynamicColor = Color.Lerp(palette.zeroPressureEquilibrium, palette.highPressureCrest, normalizedPressure);
+                localWavePressure = Mathf.Sin((Time.time * visualOmega) - (r * visualK)) * calculatedRMS;
+            }
+
+            float normalizedPressure = Mathf.Clamp(localWavePressure, -1f, 1f);
+
+            // 3. BIPOLAR COLOR MAPPING (Resting Translucent White when silent)
+            Color dynamicColor;
+            if (normalizedPressure > 0.05f)
+            {
+                dynamicColor = Color.Lerp(Color.white, Color.red, normalizedPressure);
+            }
+            else if (normalizedPressure < -0.05f)
+            {
+                dynamicColor = Color.Lerp(Color.white, Color.blue, Mathf.Abs(normalizedPressure));
             }
             else
             {
-                dynamicColor = Color.Lerp(palette.zeroPressureEquilibrium, palette.lowPressureTrough, Mathf.Abs(normalizedPressure));
+                dynamicColor = Color.white; // Silence or 0 Pa equilibrium resting point
             }
 
-            dynamicColor.a = waveOpacity * distanceDecay;
+            // Alpha scaling per shell
+            dynamicColor.a = waveOpacity * 0.35f * Mathf.Max(distanceDecay, 0.2f);
 
-            WaveDataIdentifier identifier = wave.GetComponent<WaveDataIdentifier>();
-            if (identifier != null)
-            {
-                identifier.waveFrequency = Mathf.RoundToInt(detectedDominantFrequency);
-                identifier.harmonicOrder = normalizedPressure > 0.05f ? "Fourier Compression Zone (High Pressure Crest)" :
-                                           normalizedPressure < -0.05f ? "Fourier Rarefaction Zone (Low Pressure Trough)" : "Acoustic Equilibrium Node (Zero Pressure)";
-            }
-
+            // 4. Update Shader Renderer
             Renderer waveRenderer = wave.GetComponent<Renderer>();
             if (waveRenderer != null)
             {
                 waveRenderer.GetPropertyBlock(propBlock);
+                
                 propBlock.SetColor("_Color", dynamicColor);
-                propBlock.SetColor("_BaseColor", dynamicColor);
-                propBlock.SetColor("_EmissionColor", dynamicColor * maxGlowIntensity * distanceDecay);
+                propBlock.SetColor("_BaseColor", dynamicColor); 
+                propBlock.SetColor("_EmissionColor", Color.black);
+
                 waveRenderer.SetPropertyBlock(propBlock);
             }
         }
@@ -704,6 +766,20 @@ public class AdvancedWaveManager2 : MonoBehaviour
         if (bridge != null) bridge.UpdateTextValue(targetSlider.value);
     }
 
+    private void UpdateUIScreen()
+    {
+        if (uiTextDisplay == null) return;
+
+        if (audioSource != null && audioSource.isPlaying && audioSource.clip != null)
+        {
+            uiTextDisplay.text = $"<b>ACTIVE MULTI-FREQUENCY SIMULATION</b>\n" +
+                                 $"File Name: {audioSource.clip.name}\n" +
+                                 $"Sampler Frequency: {audioSource.clip.frequency} Hz\n" +
+                                 $"Dominant Peak Frequency: {detectedDominantFrequency:F0} Hz\n" +
+                                 $"Real-time RMS Level: {calculatedRMS:F4} Pa";
+        }
+    }
+
     void HandleWaveInterrogation()
     {
         if (tooltipPanel == null || tooltipText == null || !analysisComplete) return;
@@ -722,7 +798,7 @@ public class AdvancedWaveManager2 : MonoBehaviour
 
                 tooltipText.text = $"<b>{targetedWave.harmonicOrder}</b>\n" +
                                    $"Current Selected File: {(audioSource != null && audioSource.clip != null ? audioSource.clip.name : "None")}\n" +
-                                   $"Track Dominant Peak: {targetedWave.waveFrequency} Hz\n" +
+                                   $"Band Peak Frequency: {targetedWave.waveFrequency} Hz\n" +
                                    $"Real-time RMS Level: {calculatedRMS:F5}\n" +
                                    $"Calculated Peak Pressure: {peakPressure:F5}\n" +
                                    $"Distance From Source: {hitRadius:F2} m";
@@ -739,27 +815,11 @@ public class AdvancedWaveManager2 : MonoBehaviour
         {
             MaterialPropertyBlock propBlock = new MaterialPropertyBlock();
             r.GetPropertyBlock(propBlock);
+
             propBlock.SetVector("_ChamberMin", new Vector4(chamberMin.x, chamberMin.y, chamberMin.z, 0f));
             propBlock.SetVector("_ChamberMax", new Vector4(chamberMax.x, chamberMax.y, chamberMax.z, 0f));
-            r.SetPropertyBlock(propBlock);
-        }
-    }
 
-    void UpdateUIScreen()
-    {
-        if (uiTextDisplay == null) return;
-        
-        if (audioSource != null && audioSource.isPlaying && audioSource.clip != null)
-        {
-            uiTextDisplay.text = $"<b>ACTIVE RECORDING SIMULATION</b>\n" +
-                                 $"File Name: {audioSource.clip.name}\n" +
-                                 $"Sampler Frequency: {audioSource.clip.frequency} Hz\n" +
-                                 $"Dominant Tone Peak: {detectedDominantFrequency:F0} Hz\n" +
-                                 $"RMS Amplitude: {calculatedRMS:F4} Pa";
-        }
-        else
-        {
-            uiTextDisplay.text = "<b>SYSTEM STANDBY</b>\nSelect a recording to begin wave analysis.";
+            r.SetPropertyBlock(propBlock);
         }
     }
 }
